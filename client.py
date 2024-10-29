@@ -9,6 +9,8 @@ STATE_DISCONNECTED = "DISCONNECTED"   # State: disconnected
 STATE_WAIT_SYN_ACK = "WAIT_SYN_ACK"   # State: waiting for SYN-ACK
 STATE_CONNECTED = "CONNECTED"         # State: connected
 STATE_WAIT_FIN_ACK = "WAIT_FIN_ACK"   # State: waiting for FIN-ACK
+STATE_WAIT_ACK = "WAIT_ACK"
+STATE_SEND_NEXT_PACKET = "SEND_NEXT_PACKET"
 
 # Packet's types
 TYPE_MESSAGE = 0x01       # Packet type: message
@@ -21,6 +23,7 @@ TYPE_HEARTBEAT = 0x07     # Packet type: HEARTBEAT (keep-alive signal)
 TYPE_HEARTBEAT_ACK = 0x08 # Packet type: HEARTBEAT-ACK (acknowledgment for HEARTBEAT)
 TYPE_NACK = 0x09          # Packet type: NACK (negative acknowledgment)
 TYPE_DATA = 0x0A          # Packet type: DATA (file or data transmission)
+TYPE_FIN_FRAG = 0x0B
 
 state = STATE_DISCONNECTED  # Initial state
 heartbeat_interval = 5
@@ -45,6 +48,17 @@ class ParsedPacket:
     payload: str            # Payload (message or data)
 
 
+@dataclass
+class received_message:
+    message: str
+    sequence_number: int
+    allIsCorrect: bool
+
+packet_ID = 0
+allReceived = True
+fragments = [received_message("", 0, True) for _ in range(32768)]
+
+
 def change_state(new_state):
     global state
     state = new_state
@@ -57,14 +71,14 @@ def create_packet(packet_flag, packet_id, sequence_number, checksum, total_lengt
     packet += sequence_number.to_bytes(1, 'big')   # Sequence number (1 byte)
     packet += checksum.to_bytes(2, 'big')          # Checksum (2 bytes)
     packet += total_length.to_bytes(2, 'big')      # Total length (2 bytes)
-    packet += payload.encode('utf-8')              # Payload (message or data, UTF-8 encoded)
+    packet += payload.encode('utf-8')
     return packet
 
 
 # Sends the packet to the remote node
-def send_packet(packet_flag, message="", sequence_number=1, packet_id=1, checksum=0):
-    total_length = len(message.encode('utf-8'))  # Calculate the total length of the message
-    packet = create_packet(packet_flag, packet_id, sequence_number, checksum, total_length, message)
+def send_packet(packet_flag, payload="", packet_id=1, sequence_number=1, checksum=0):
+    total_length = len(payload.encode('utf-8'))  # Calculate the total length of the message
+    packet = create_packet(packet_flag, packet_id, sequence_number, checksum, total_length, payload)
     sock.sendto(packet, (remote_ip, remote_port))
 
 
@@ -93,6 +107,7 @@ def show_help():
 Available commands:
 1. connect - Initiate connection to the partner.
 2. send message <text> - Send a message to the partner (only available when connected).
+3. send file (<file name>, <length of fragments>) - Send a file to the partner (only available when connected).
 3. disconnect - Gracefully disconnect from the partner.
 4. help - Show this list of commands.
 """)
@@ -180,14 +195,103 @@ def heartbeat_monitor():
             break
 
 
+def calculate_crc16(data: bytes) -> int:
+    crc = 0xFFFF  # Начальная инициализация
+    polynomial = 0x1021
+
+    for byte in data:
+        crc ^= byte << 8  # XOR with every byte
+        for _ in range(8):
+            if crc & 0x8000:  # If MSB is 1
+                crc = (crc << 1) ^ polynomial
+            else:
+                crc <<= 1
+            crc &= 0xFFFF  # Make sure, that it's 16-bites value
+    return crc
+
+def wait_for_ack():
+    while True:
+        if state == STATE_CONNECTED:
+            break
+
+
+def send_file(file_name, fragment_length):
+    global packet_ID, state
+
+    packet_ID += 1
+
+    last_fragments = []
+    sequence_number = 0
+
+    with open(file_name, "rb") as file:
+        while True:
+            if allReceived:
+                data = file.read(fragment_length)
+                if not data:
+                    break
+                last_fragments.append(data)
+                crc = calculate_crc16(data)
+                sequence_number += 1
+                send_packet(TYPE_DATA, data.decode('utf-8'), packet_ID, sequence_number, crc)
+                if sequence_number == 6:
+                    change_state(STATE_WAIT_ACK)
+                    wait_for_ack()
+                    sequence_number = 0
+            else:
+                for data in last_fragments:
+                    crc = calculate_crc16(data)
+                    sequence_number += 1
+                    send_packet(TYPE_DATA, data.decode('utf-8'), packet_ID, sequence_number, crc)
+                    if sequence_number == 6:
+                        change_state(STATE_WAIT_ACK)
+                        wait_for_ack()
+                        sequence_number = 0
+
+    print("Partner has all fragments!")
+
+
+
+def checkIfSomethingIsWrong(packet):
+    calculated_crc = calculate_crc16(packet.payload.encode('utf-8'))
+
+    if calculated_crc != packet.checksum:
+        fragments[packet.packet_id].allIsCorrect = False
+
+    fragments[packet.packet_id].message += packet.payload
+    fragments[packet.packet_id].sequence_number += 1
+
+    if fragments[packet.packet_id].sequence_number >= 6:
+        if fragments[packet.packet_id].allIsCorrect:
+            with open("recieved" + str(packet.packet_id), "a") as file:
+                file.write(fragments[packet.packet_id].message)
+            send_packet(TYPE_ACK)
+        else:
+            send_packet(TYPE_NACK)
+
+        fragments[packet.packet_id] = received_message("", 0, True)
+
+
+
+
+
 # Receives packets and handles the protocol logic for various packet types
 def receive_message():
-    global heartbeat_received
+    global heartbeat_received, allReceived
 
     while True:
         data, addr = sock.recvfrom(1024)  # Receive packet
 
         packet = parse_packet(data)
+
+        if packet.packet_flag == TYPE_ACK:
+            change_state(STATE_CONNECTED)
+            allReceived = True
+            continue
+
+        if packet.packet_flag == TYPE_NACK:
+            change_state(STATE_CONNECTED)
+            allReceived = False
+            continue
 
         # Handle incoming SYN packet (connection request)
         if packet.packet_flag == TYPE_SYN:
@@ -222,6 +326,10 @@ def receive_message():
         elif packet.packet_flag == TYPE_HEARTBEAT_ACK:
             continue
 
+        if packet.packet_flag == TYPE_DATA:
+            checkIfSomethingIsWrong(packet)
+            continue
+
         print(f"You got message from {addr}: {packet.payload}")  # Print received message
 
 def handle_commands():
@@ -238,6 +346,13 @@ def handle_commands():
         elif command.startswith("send message") and state == STATE_CONNECTED:
             message = command[len("send message "):]  # Extracting message text
             message_queue.put(message)  # Putting the message into the queue
+
+        elif command.startswith("send file") and state == STATE_CONNECTED:
+            command = command.replace("send file (", "").replace(")", "")
+            file_name, fragment_length = command.split(", ")
+            send_file(file_name, int(fragment_length))
+
+
 
         elif command == "disconnect" and state == STATE_CONNECTED:
             with lock:
@@ -263,7 +378,7 @@ def process_message_queue():
 # Network settings
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 local_port = int(input("Enter the port to listen on: "))
-remote_ip = input ("Enter the remote node’s IP address : ")
+remote_ip = "127.0.0.1"
 remote_port = int(input("Enter the target node's port: "))
 print(f"Sending messages to {remote_ip}:{remote_port}")
 sock.bind(("", local_port))
