@@ -425,19 +425,15 @@ def handle_commands():
         elif command.startswith("send message") and state == STATE_CONNECTED:
             command = command.replace("send message (", "").replace(")", "")
             message, fragment_length = command.split(", ")
-            send_message(message, int(fragment_length))
-            # message_queue.put(message)  # Putting the message into the queue
+            add_task_to_queue(send_message, message, int(fragment_length))
 
         elif command.startswith("send file") and state == STATE_CONNECTED:
             command = command.replace("send file (", "").replace(")", "")
             file_name, fragment_length = command.split(", ")
-            send_file(file_name, int(fragment_length))
-
-
+            add_task_to_queue(send_file, file_name, int(fragment_length))
 
         elif command == "disconnect" and state == STATE_CONNECTED:
             with lock:
-                # print("Send FIN")
                 send_packet(TYPE_FIN)
                 change_state(STATE_WAIT_FIN_ACK)  # Transition to the state waiting for FIN-ACK
 
@@ -447,14 +443,15 @@ def handle_commands():
         else:
             print("Invalid command or inappropriate state. Type 'help' for the list of available commands.")
 
+def add_task_to_queue(task, *args):
+    message_queue.put((task, args))
 
-# def process_message_queue():
-#     while True:
-#         if not message_queue.empty():
-#             if state == STATE_CONNECTED:  # Sending messages only in the CONNECTED state
-#                 message = message_queue.get()
-#                 print(f"Sending message: {message}")
-#                 send_packet(TYPE_MESSAGE, message)
+def process_message_queue():
+    while True:
+        if not message_queue.empty():
+            if state == STATE_CONNECTED:  # Sending messages only in the CONNECTED state
+                task, args = message_queue.get()
+                task(*args)
 
 
 # Network settings
