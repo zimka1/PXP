@@ -1,7 +1,6 @@
 import socket
 import threading
 import time
-from fileinput import filename
 from queue import Queue
 from dataclasses import dataclass
 import os
@@ -34,6 +33,7 @@ heartbeat_interval_to_ans = 2
 max_missed_heartbeats = 3
 heartbeat_missed = 0
 heartbeat_received = 0
+areYouAFK = 1
 
 # Mutex for preventing simultaneous execution
 lock = threading.Lock()
@@ -176,6 +176,21 @@ def continue_termination():
                 change_state(STATE_DISCONNECTED)  # Return to DISCONNECTED state
 
 
+def wait_for_AFK():
+    """
+       Checks if the client is inactive (AFK) by waiting for a set interval.
+       If the client is active during this period, the function returns False.
+       Otherwise, it returns True to indicate the client is AFK.
+    """
+    global areYouAFK
+    areYouAFK = 1
+    for i in range(heartbeat_interval):
+        time.sleep(1)
+        if not areYouAFK:
+            return False
+    return True
+
+
 # Continuously monitors for heartbeat signals to keep the connection alive
 def wait_for_heartbeat():
     while True:
@@ -187,7 +202,9 @@ def wait_for_heartbeat():
 def heartbeat_monitor():
     global heartbeat_missed, heartbeat_received
     while state == STATE_CONNECTED:
-        time.sleep(heartbeat_interval)
+
+        if not wait_for_AFK():
+            continue
 
         send_packet(TYPE_HEARTBEAT)  # Send HEARTBEAT
 
@@ -205,9 +222,6 @@ def heartbeat_monitor():
             heartbeat_missed = 0
             change_state(STATE_DISCONNECTED)
             break
-
-
-import os
 
 
 def calculate_crc16(data: bytes) -> int:
@@ -428,10 +442,13 @@ def save_data(packet):
 
 # Receives packets and handles the protocol logic for various packet types
 def receive_message():
-    global heartbeat_received, allReceived, canISendFragments
+    global heartbeat_received, allReceived, canISendFragments, areYouAFK
+
 
     while True:
         data, addr = sock.recvfrom(1024)  # Receive packet
+
+        areYouAFK = 0
 
         packet = parse_packet(data)
 
@@ -488,6 +505,8 @@ def receive_message():
 
 
 def handle_commands():
+    global areYouAFK
+
     print("Type 'help' to see the list of available commands.")
     while True:
         command = input().strip().lower()
@@ -518,9 +537,12 @@ def handle_commands():
 
         elif command == "help":
             show_help()
-
+            continue
         else:
             print("Invalid command or inappropriate state. Type 'help' for the list of available commands.")
+            continue
+
+        areYouAFK = 0
 
 def add_task_to_queue(task, *args):
     message_queue.put((task, args))
