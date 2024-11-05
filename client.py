@@ -1,9 +1,10 @@
 import socket
 import threading
 import time
+from fileinput import filename
 from queue import Queue
 from dataclasses import dataclass
-
+import os
 
 # Defining states
 STATE_DISCONNECTED = "DISCONNECTED"  # State: disconnected
@@ -23,7 +24,9 @@ TYPE_HEARTBEAT = 0x07  # Packet type: HEARTBEAT (keep-alive signal)
 TYPE_HEARTBEAT_ACK = 0x08  # Packet type: HEARTBEAT-ACK (acknowledgment for HEARTBEAT)
 TYPE_NACK = 0x09  # Packet type: NACK (negative acknowledgment)
 TYPE_DATA = 0x0A  # Packet type: DATA (file or data transmission)
-TYPE_FIN_FRAG = 0x0B
+TYPE_FILENAME = 0x0B
+TYPE_FIN_FRAG = 0x0C
+
 
 state = STATE_DISCONNECTED  # Initial state
 heartbeat_interval = 5
@@ -51,6 +54,7 @@ class ParsedPacket:
 
 @dataclass
 class received_message:
+    filename: str
     type: int
     message: str
     sequence_number: int
@@ -60,7 +64,7 @@ class received_message:
 packet_ID = 0
 canISendFragments = True
 allReceived = True
-fragments = [received_message(0, "", 0, True) for _ in range(32768)]
+fragments = [received_message("", 0, "", 0, True) for _ in range(32768)]
 total_message = ["" for _ in range(32768)]
 
 
@@ -204,7 +208,7 @@ def heartbeat_monitor():
 
 
 def calculate_crc16(data: bytes) -> int:
-    crc = 0xFFFF  # Начальная инициализация
+    crc = 0xFFFF
     polynomial = 0x1021
 
     for byte in data:
@@ -232,16 +236,26 @@ def send_file(file_name, fragment_length):
     last_fragments = []
     sequence_number = 0
 
+    send_message(file_name, fragment_length, 'n')
+
     with open(file_name, "rb") as file:
         while True:
             if allReceived:
                 data = file.read(fragment_length)
-                if not data:
+                if not data and sequence_number != 0:
+                    send_packet(TYPE_FIN_FRAG, "", packet_ID, sequence_number, 0)
+                    canISendFragments = False
+                    wait_for_ack()
+                    sequence_number = 0
+                    continue
+                elif not data:
+                    send_packet(TYPE_FIN_FRAG, "", packet_ID, sequence_number, 0)
                     break
                 last_fragments.append(data)
                 crc = calculate_crc16(data)
                 sequence_number += 1
                 send_packet(TYPE_DATA, data.decode('utf-8'), packet_ID, sequence_number, crc)
+                print("send: " + data.decode('utf-8') + " " + str(sequence_number))
                 if sequence_number == 6:
                     canISendFragments = False
                     wait_for_ack()
@@ -251,39 +265,48 @@ def send_file(file_name, fragment_length):
                     crc = calculate_crc16(data)
                     sequence_number += 1
                     send_packet(TYPE_DATA, data.decode('utf-8'), packet_ID, sequence_number, crc)
-                    if sequence_number == 6:
+                    if sequence_number == len(last_fragments):
                         canISendFragments = False
                         wait_for_ack()
                         sequence_number = 0
 
-    if sequence_number != 0:
-        send_packet(TYPE_FIN_FRAG, "", packet_ID)
-        canISendFragments = False
-        wait_for_ack()
-    else:
-        send_packet(TYPE_FIN_FRAG, "", packet_ID)
-
     print("Partner has all fragments!")
 
 
-def send_message(message, fragment_length):
+def send_message(message, fragment_length, flag):
     global packet_ID, state, canISendFragments
 
-    packet_ID += 1
+    if flag != 'n':
+        packet_ID += 1
+
     last_fragments = []
     sequence_number = 0
-    position = 0
+    position = -fragment_length
 
     while position < len(message):
         if allReceived:
+            if position + fragment_length >= len(message) and sequence_number != 0:
+                send_packet(TYPE_FIN_FRAG, "", packet_ID, sequence_number, 0)
+                canISendFragments = False
+                wait_for_ack()
+                sequence_number = 0
+                continue
+            elif position > len(message):
+                send_packet(TYPE_FIN_FRAG, "", packet_ID, sequence_number, 0)
+                break
+
+
+            position += fragment_length
             fragment = message[position:min(position + fragment_length, len(message))]
             last_fragments.append(fragment)
             crc = calculate_crc16(fragment.encode('utf-8'))
             sequence_number += 1
 
-            send_packet(TYPE_MESSAGE, fragment, packet_ID, sequence_number, crc)
+            if flag == 'n':
+                send_packet(TYPE_FILENAME, fragment, packet_ID, sequence_number, crc)
+            else:
+                send_packet(TYPE_MESSAGE, fragment, packet_ID, sequence_number, crc)
 
-            position += fragment_length
             if sequence_number == 6:
                 canISendFragments = False
                 wait_for_ack()
@@ -292,21 +315,21 @@ def send_message(message, fragment_length):
             for fragment in last_fragments:
                 crc = calculate_crc16(fragment.encode('utf-8'))
                 sequence_number += 1
-                send_packet(TYPE_MESSAGE, fragment, packet_ID, sequence_number, crc)
 
-                if sequence_number == 6:
+                if flag == 'n':
+                    send_packet(TYPE_FILENAME, fragment, packet_ID, sequence_number, crc)
+                else:
+                    send_packet(TYPE_MESSAGE, fragment, packet_ID, sequence_number, crc)
+
+                if sequence_number == len(last_fragments):
                     canISendFragments = False
                     wait_for_ack()
                     sequence_number = 0
 
-    if sequence_number != 0:
-        send_packet(TYPE_FIN_FRAG, "", packet_ID)
-        canISendFragments = False
-        wait_for_ack()
+    if flag != 'n':
+        print("Partner has received all fragments!")
     else:
-        send_packet(TYPE_FIN_FRAG, "", packet_ID)
-
-    print("Partner has received all fragments!")
+        print("Partner has received all fragments of filename!")
 
 def checkIfSomethingIsWrong(packet):
     calculated_crc = calculate_crc16(packet.payload.encode('utf-8'))
@@ -320,35 +343,51 @@ def checkIfSomethingIsWrong(packet):
 
     if fragments[packet.packet_id].sequence_number == 6:
         if fragments[packet.packet_id].allIsCorrect:
-
-            if fragments[packet.packet_id].type == TYPE_DATA:
-                with open("recieved" + str(packet.packet_id), "a") as file:
-                    file.write(fragments[packet.packet_id].message)
-            else:
-                total_message[packet.packet_id] += fragments[packet.packet_id].message
-
+            total_message[packet.packet_id] += fragments[packet.packet_id].message
             send_packet(TYPE_ACK)
         else:
             send_packet(TYPE_NACK)
-        fragments[packet.packet_id] = received_message(fragments[packet.packet_id].type, "", 0, True)
+        fragments[packet.packet_id].message = ""
+        fragments[packet.packet_id].sequence_number = 0
+        fragments[packet.packet_id].allIsCorrect = True
 
+def check_file_exists(file_path):
+    return os.path.isfile(file_path)
 
 def save_data(packet):
     if fragments[packet.packet_id].message != "" and fragments[packet.packet_id].allIsCorrect:
-        if fragments[packet.packet_id].type == TYPE_DATA:
-            with open("recieved" + str(packet.packet_id), "a") as file:
-                file.write(fragments[packet.packet_id].message)
-        else:
-            total_message[packet.packet_id] += fragments[packet.packet_id].message
+        total_message[packet.packet_id] += fragments[packet.packet_id].message
         send_packet(TYPE_ACK)
-    else:
+    elif not fragments[packet.packet_id].allIsCorrect:
         send_packet(TYPE_NACK)
+        return
 
+    if fragments[packet.packet_id].type == TYPE_FILENAME:
+        fragments[packet.packet_id].filename = total_message[packet.packet_id]
     if fragments[packet.packet_id].type == TYPE_MESSAGE:
         print(f"You got message: {total_message[packet.packet_id]}")
         total_message[packet.packet_id] = ""
+    elif fragments[packet.packet_id].type == TYPE_DATA:
+        filename = ""
+        for i in range (0, 32768):
+            name, filetype = fragments[packet.packet_id].filename.split('.')
+            print(i)
+            if not i:
+                cur_filename = "recieved_" + name + '.' + filetype
+            else:
+                cur_filename = "recieved_" + name + "_" + str(i) + '.' + filetype
+            if not check_file_exists(cur_filename):
+                filename = cur_filename
+                break
 
-    fragments[packet.packet_id] = received_message(0, "", 0, True)
+        with open(filename, "a") as file:
+            file.write(total_message[packet.packet_id])
+
+    total_message[packet.packet_id] = ""
+    if fragments[packet.packet_id].type == TYPE_FILENAME:
+        fragments[packet.packet_id] = received_message(fragments[packet.packet_id].filename, 0, "", 0, True)
+    else:
+        fragments[packet.packet_id] = received_message("",0, "", 0, True)
 
 
 # Receives packets and handles the protocol logic for various packet types
@@ -403,7 +442,7 @@ def receive_message():
         elif packet.packet_flag == TYPE_HEARTBEAT_ACK:
             continue
 
-        if packet.packet_flag == TYPE_DATA or packet.packet_flag == TYPE_MESSAGE:
+        if packet.packet_flag == TYPE_DATA or packet.packet_flag == TYPE_MESSAGE or packet.packet_flag == TYPE_FILENAME:
             checkIfSomethingIsWrong(packet)
             continue
 
@@ -421,11 +460,15 @@ def handle_commands():
             with lock:  # Using lock
                 send_packet(TYPE_SYN)
                 change_state(STATE_WAIT_SYN_ACK)  # Transition to the state waiting for SYN-ACK
+            time.sleep(2)
+            if state == STATE_WAIT_SYN_ACK:
+                print("Connection error.")
+                change_state(STATE_DISCONNECTED)
 
         elif command.startswith("send message") and state == STATE_CONNECTED:
             command = command.replace("send message (", "").replace(")", "")
             message, fragment_length = command.split(", ")
-            add_task_to_queue(send_message, message, int(fragment_length))
+            add_task_to_queue(send_message, message, int(fragment_length), 'm')
 
         elif command.startswith("send file") and state == STATE_CONNECTED:
             command = command.replace("send file (", "").replace(")", "")
