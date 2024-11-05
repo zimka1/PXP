@@ -207,22 +207,29 @@ def heartbeat_monitor():
             break
 
 
+import os
+
+
 def calculate_crc16(data: bytes) -> int:
+    # Initialize CRC and define polynomial
     crc = 0xFFFF
     polynomial = 0x1021
 
+    # Iterate over each byte in data
     for byte in data:
-        crc ^= byte << 8  # XOR with every byte
+        crc ^= byte << 8  # XOR with each byte
         for _ in range(8):
-            if crc & 0x8000:  # If MSB is 1
+            # Check if the most significant bit is 1
+            if crc & 0x8000:
                 crc = (crc << 1) ^ polynomial
             else:
                 crc <<= 1
-            crc &= 0xFFFF  # Make sure, that it's 16-bites value
+            crc &= 0xFFFF  # Ensure it's a 16-bit value
     return crc
 
 
 def wait_for_ack():
+    # Loop until fragments can be sent
     while True:
         if canISendFragments:
             break
@@ -231,17 +238,22 @@ def wait_for_ack():
 def send_file(file_name, fragment_length):
     global packet_ID, state, canISendFragments
 
+    # Increment packet ID for new file
     packet_ID += 1
 
+    # Stores last fragments for potential retransmission
     last_fragments = []
     sequence_number = 0
 
+    # Notify receiver about file name
     send_message(file_name, fragment_length, 'n')
 
     with open(file_name, "rb") as file:
         while True:
+            # Check if all fragments are received
             if allReceived:
                 data = file.read(fragment_length)
+                # Check if end of file is reached and all fragments are sent
                 if not data and sequence_number != 0:
                     send_packet(TYPE_FIN_FRAG, "", packet_ID, sequence_number, 0)
                     canISendFragments = False
@@ -251,16 +263,21 @@ def send_file(file_name, fragment_length):
                 elif not data:
                     send_packet(TYPE_FIN_FRAG, "", packet_ID, sequence_number, 0)
                     break
+
+                # Store fragment and calculate CRC
                 last_fragments.append(data)
                 crc = calculate_crc16(data)
                 sequence_number += 1
                 send_packet(TYPE_DATA, data.decode('utf-8'), packet_ID, sequence_number, crc)
                 print("send: " + data.decode('utf-8') + " " + str(sequence_number))
+
+                # After sending 6 fragments, wait for acknowledgment
                 if sequence_number == 6:
                     canISendFragments = False
                     wait_for_ack()
                     sequence_number = 0
             else:
+                # Resend stored fragments if acknowledgment was not received
                 for data in last_fragments:
                     crc = calculate_crc16(data)
                     sequence_number += 1
@@ -276,9 +293,11 @@ def send_file(file_name, fragment_length):
 def send_message(message, fragment_length, flag):
     global packet_ID, state, canISendFragments
 
+    # Increment packet ID unless flag is set
     if flag != 'n':
         packet_ID += 1
 
+    # Stores fragments for potential retransmission
     last_fragments = []
     sequence_number = 0
     position = -fragment_length
@@ -295,23 +314,26 @@ def send_message(message, fragment_length, flag):
                 send_packet(TYPE_FIN_FRAG, "", packet_ID, sequence_number, 0)
                 break
 
-
+            # Prepare and send next fragment
             position += fragment_length
             fragment = message[position:min(position + fragment_length, len(message))]
             last_fragments.append(fragment)
             crc = calculate_crc16(fragment.encode('utf-8'))
             sequence_number += 1
 
+            # Send packet based on flag type (filename or message)
             if flag == 'n':
                 send_packet(TYPE_FILENAME, fragment, packet_ID, sequence_number, crc)
             else:
                 send_packet(TYPE_MESSAGE, fragment, packet_ID, sequence_number, crc)
 
+            # After sending 6 fragments, wait for acknowledgment
             if sequence_number == 6:
                 canISendFragments = False
                 wait_for_ack()
                 sequence_number = 0
         else:
+            # Resend last fragments if acknowledgment was not received
             for fragment in last_fragments:
                 crc = calculate_crc16(fragment.encode('utf-8'))
                 sequence_number += 1
@@ -326,21 +348,27 @@ def send_message(message, fragment_length, flag):
                     wait_for_ack()
                     sequence_number = 0
 
+    # Confirmation of all fragments sent
     if flag != 'n':
         print("Partner has received all fragments!")
     else:
         print("Partner has received all fragments of filename!")
 
+
 def checkIfSomethingIsWrong(packet):
+    # Calculate CRC to verify packet integrity
     calculated_crc = calculate_crc16(packet.payload.encode('utf-8'))
 
+    # If CRC does not match, mark fragment as incorrect
     if calculated_crc != packet.checksum:
         fragments[packet.packet_id].allIsCorrect = False
 
+    # Store packet information in fragments list
     fragments[packet.packet_id].type = packet.packet_flag
     fragments[packet.packet_id].message += packet.payload
     fragments[packet.packet_id].sequence_number += 1
 
+    # After receiving 6 fragments, send ACK or NACK based on correctness
     if fragments[packet.packet_id].sequence_number == 6:
         if fragments[packet.packet_id].allIsCorrect:
             total_message[packet.packet_id] += fragments[packet.packet_id].message
@@ -351,10 +379,14 @@ def checkIfSomethingIsWrong(packet):
         fragments[packet.packet_id].sequence_number = 0
         fragments[packet.packet_id].allIsCorrect = True
 
+
 def check_file_exists(file_path):
+    # Check if file exists at the given path
     return os.path.isfile(file_path)
 
+
 def save_data(packet):
+    # Verify if fragment is complete and correct, then add to total message
     if fragments[packet.packet_id].message != "" and fragments[packet.packet_id].allIsCorrect:
         total_message[packet.packet_id] += fragments[packet.packet_id].message
         send_packet(TYPE_ACK)
@@ -362,32 +394,36 @@ def save_data(packet):
         send_packet(TYPE_NACK)
         return
 
+    # Handle specific packet types
     if fragments[packet.packet_id].type == TYPE_FILENAME:
         fragments[packet.packet_id].filename = total_message[packet.packet_id]
     if fragments[packet.packet_id].type == TYPE_MESSAGE:
         print(f"You got message: {total_message[packet.packet_id]}")
         total_message[packet.packet_id] = ""
     elif fragments[packet.packet_id].type == TYPE_DATA:
+        # Generate unique filename for received file
         filename = ""
-        for i in range (0, 32768):
+        for i in range(32768):
             name, filetype = fragments[packet.packet_id].filename.split('.')
             print(i)
             if not i:
-                cur_filename = "recieved_" + name + '.' + filetype
+                cur_filename = "received_" + name + '.' + filetype
             else:
-                cur_filename = "recieved_" + name + "_" + str(i) + '.' + filetype
+                cur_filename = "received_" + name + "_" + str(i) + '.' + filetype
             if not check_file_exists(cur_filename):
                 filename = cur_filename
                 break
 
+        # Save total message content to the determined filename
         with open(filename, "a") as file:
             file.write(total_message[packet.packet_id])
 
+    # Reset total message and fragments after saving
     total_message[packet.packet_id] = ""
     if fragments[packet.packet_id].type == TYPE_FILENAME:
         fragments[packet.packet_id] = received_message(fragments[packet.packet_id].filename, 0, "", 0, True)
     else:
-        fragments[packet.packet_id] = received_message("",0, "", 0, True)
+        fragments[packet.packet_id] = received_message("", 0, "", 0, True)
 
 
 # Receives packets and handles the protocol logic for various packet types
