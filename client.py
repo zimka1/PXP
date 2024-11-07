@@ -132,14 +132,22 @@ def parse_packet(packet):
 
 # Displays available commands to the user
 def show_help():
-    print("""
-Available commands:
-1. connect - Initiate connection to the partner.
-2. send message (<message>, <length of fragments>) - Send a message to the partner (only available when connected).
-3. send file (<file name>, <length of fragments>) - Send a file to the partner (only available when connected).
-3. disconnect - Gracefully disconnect from the partner.
-4. change mode - Enable or Disable packet loss simulation during transmission.
-5. help - Show this list of commands.
+    blue_text = "\033[94m"
+    reset_text = "\033[0m"
+    red_text = "\033[91m"
+    yellow_text = "\033[93m"
+    green_text = "\033[92m"
+
+    print(f"""
+{green_text}Available commands:
+{yellow_text}1. {blue_text}help{reset_text} - Show this list of commands.
+{yellow_text}2. {blue_text}connect{reset_text} - Initiate connection to the partner.
+{yellow_text}3. {blue_text}disconnect{reset_text} - Gracefully disconnect from the partner.
+{yellow_text}4. {blue_text}change mode{reset_text} - Enable or Disable packet loss simulation during transmission {red_text}(only available when connected).{reset_text}
+{yellow_text}5. {blue_text}send message (<message>, <length of fragments>){reset_text} - Send a message in fragments to the partner {red_text}(only available when connected).{reset_text}
+{yellow_text}6. {blue_text}send message (<message>){reset_text} - Send a message {red_text}NOT{reset_text} in fragments to the partner {red_text}(only available when connected).{reset_text}
+{yellow_text}7. {blue_text}send file (<file name>, <length of fragments>){reset_text} - Send a file in fragments to the partner {red_text}(only available when connected).{reset_text}
+{yellow_text}8. {blue_text}send file (<file name>){reset_text} - Send a file {red_text}NOT{reset_text} in fragments to the partner {red_text}(only available when connected).{reset_text}
 """)
 
 
@@ -269,6 +277,23 @@ def should_drop_or_damage_packet(probability):
 def damage_packet(crc):
     return crc ^ 0x1
 
+
+def send_again(window_number):
+    for sequence_number_of_missed_packet in missed_packets:
+        for sent_packet in sent_packets:
+            parsed_sent_packet = parse_packet(sent_packet)
+            print(parsed_sent_packet)
+            if parsed_sent_packet.sequence_number == sequence_number_of_missed_packet:
+                window_number += 1
+                print(
+                    f"sent again: {parsed_sent_packet.payload} sequence: {sequence_number_of_missed_packet}")
+                send_packet(parsed_sent_packet.packet_flag, parsed_sent_packet.payload,
+                            parsed_sent_packet.packet_id, parsed_sent_packet.sequence_number, 0,
+                            parsed_sent_packet.checksum)
+                break
+    return window_number
+
+
 def send_file(file_name, fragment_length):
     global packet_ID, state, canISendFragments, allReceived, missed_packets, sent_packets
 
@@ -278,11 +303,13 @@ def send_file(file_name, fragment_length):
     window_number = 0
     count_missed_packets = 0
 
-    send_message(file_name, fragment_length, 'n')
-
     with open(file_name, "rb") as file:
         content = file.read()
         total_length = len(content)
+
+    send_message(file_name, len(file_name) if total_length == fragment_length else fragment_length, 'n')
+
+
 
 
     with open(file_name, "rb") as file:
@@ -295,8 +322,11 @@ def send_file(file_name, fragment_length):
                 crc = calculate_crc16(data)
                 sequence_number += 1
                 window_number += 1
-                acknowledgment_number = min(6 - count_missed_packets, math.ceil((total_length - sequence_number * fragment_length) / 2))
 
+                how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
+
+                acknowledgment_number = min(6 - count_missed_packets, how_much_left)
+                print(acknowledgment_number)
                 send_packet(TYPE_MAKE_MONITOR, "", packet_ID, 0, acknowledgment_number)
 
                 print(f"sent: {data.decode('utf-8')} sequence: {sequence_number} window: {window_number}")
@@ -323,20 +353,9 @@ def send_file(file_name, fragment_length):
             else:
                 print(f"missed packets: {missed_packets}")
                 print(sent_packets)
-                window_number = 0
+
+                window_number = send_again(window_number)
                 count_missed_packets = len(missed_packets)
-                for sequence_number_of_missed_packet in missed_packets:
-                    for sent_packet in sent_packets:
-                        parsed_sent_packet = parse_packet(sent_packet)
-                        print(parsed_sent_packet)
-                        if parsed_sent_packet.sequence_number == sequence_number_of_missed_packet:
-                            window_number += 1
-                            print(
-                                f"sent again: {parsed_sent_packet.payload} sequence: {sequence_number_of_missed_packet}")
-                            send_packet(parsed_sent_packet.packet_flag, parsed_sent_packet.payload,
-                                        parsed_sent_packet.packet_id, parsed_sent_packet.sequence_number, 0,
-                                        parsed_sent_packet.checksum)
-                            break
 
                 allReceived = True
                 missed_packets = []
@@ -376,12 +395,9 @@ def send_message(message, fragment_length, flag):
             sequence_number += 1
             window_number += 1
 
-            how_much_left = 0
+            total_length = len(message)
 
-            length = len(message)
-            while length > position:
-                length -= fragment_length
-                how_much_left += 1
+            how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
 
             acknowledgment_number = min(6 - count_missed_packets, how_much_left)
 
@@ -404,17 +420,9 @@ def send_message(message, fragment_length, flag):
         else:
             print(f"missed packets: {missed_packets}")
             print(sent_packets)
-            window_number = 0
+
+            window_number = send_again(window_number)
             count_missed_packets = len(missed_packets)
-            for sequence_number_of_missed_packet in missed_packets:
-                for sent_packet in sent_packets:
-                    parsed_sent_packet = parse_packet(sent_packet)
-                    print(parsed_sent_packet)
-                    if parsed_sent_packet.sequence_number == sequence_number_of_missed_packet:
-                        window_number += 1
-                        print(f"sent again: {parsed_sent_packet.payload} sequence: {sequence_number_of_missed_packet}")
-                        send_packet(parsed_sent_packet.packet_flag, parsed_sent_packet.payload, parsed_sent_packet.packet_id, parsed_sent_packet.sequence_number, 0, parsed_sent_packet.checksum)
-                        break
 
             allReceived = True
             missed_packets = []
@@ -428,7 +436,6 @@ def send_message(message, fragment_length, flag):
 
     sent_packets = []
 
-    # Confirmation of all fragments sent
     if flag != 'n':
         print("Partner has received all fragments!")
     else:
@@ -511,7 +518,6 @@ def save_data(packet):
         filename = ""
         for i in range(32768):
             name, filetype = fragments[packet.packet_id].filename.split('.')
-            print(i)
             if not i:
                 cur_filename = "received_" + name + '.' + filetype
             else:
@@ -604,7 +610,8 @@ def receive_message():
 def handle_commands():
     global areYouAFK
 
-    print("Type 'help' to see the list of available commands.")
+    show_help()
+
     while True:
         command = input().strip().lower()
 
@@ -619,14 +626,29 @@ def handle_commands():
 
         elif command.startswith("send message") and state == STATE_CONNECTED:
             command = command.replace("send message (", "").replace(")", "")
-            message, fragment_length = command.split(", ")
-            add_task_to_queue(send_message, message, int(fragment_length), 'm')
+            parts = command.split(", ")
+
+            if len(parts) == 2:
+                message, fragment_length = parts
+                add_task_to_queue(send_message, message, int(fragment_length), 'm')
+            else:
+                message = parts[0]
+                add_task_to_queue(send_message, message, len(message), 'm')
 
         elif command.startswith("send file") and state == STATE_CONNECTED:
             command = command.replace("send file (", "").replace(")", "")
-            file_name, fragment_length = command.split(", ")
-            print(file_name, fragment_length)
-            add_task_to_queue(send_file, file_name, int(fragment_length))
+            parts = command.split(", ")
+
+            if len(parts) == 2:
+                file_name, fragment_length = parts
+                add_task_to_queue(send_file, file_name, int(fragment_length),)
+            else:
+                file_name = parts[0]
+                with open(file_name, "rb") as file:
+                    content = file.read()
+                    total_length = len(content)
+
+                add_task_to_queue(send_file, file_name, total_length)
 
         elif command == "disconnect" and state == STATE_CONNECTED:
             with lock:
@@ -642,9 +664,6 @@ def handle_commands():
                 print("Your mode is ORDINARY_MODE now.")
             continue
 
-        elif command == "help":
-            show_help()
-            continue
         else:
             print("Invalid command or inappropriate state. Type 'help' for the list of available commands.")
             continue
