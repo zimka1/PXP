@@ -273,21 +273,24 @@ def damage_packet(crc):
     return crc ^ 0x1
 
 
-def send_again(window_number):
+def send_again():
+    global allReceived, missed_packets, canISendFragments
     for sequence_number_of_missed_packet in missed_packets:
         for sent_packet in sent_packets:
             parsed_sent_packet = parse_packet(sent_packet)
             print(parsed_sent_packet)
             if parsed_sent_packet.sequence_number == sequence_number_of_missed_packet:
-                window_number += 1
                 print(
                     f"sent again: {parsed_sent_packet.payload} sequence: {sequence_number_of_missed_packet}")
                 send_packet(parsed_sent_packet.packet_flag,
                             parsed_sent_packet.packet_id, parsed_sent_packet.sequence_number, 0,
                             parsed_sent_packet.checksum, parsed_sent_packet.payload)
                 break
-    return window_number
 
+    allReceived = True
+    missed_packets = []
+
+    canISendFragments = False
 
 def send_file(file_name, fragment_length):
     global packet_ID, state, canISendFragments, allReceived, missed_packets, sent_packets
@@ -296,7 +299,6 @@ def send_file(file_name, fragment_length):
 
     sequence_number = -1
     window_number = 0
-    count_missed_packets = 0
 
     with open(file_name, "rb") as file:
         content = file.read()
@@ -317,7 +319,7 @@ def send_file(file_name, fragment_length):
 
                 how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
 
-                acknowledgment_number = min(6 - count_missed_packets, how_much_left)
+                acknowledgment_number = min(6, how_much_left)
                 print(acknowledgment_number)
                 send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
 
@@ -339,23 +341,16 @@ def send_file(file_name, fragment_length):
                     wait_for_ack()
                     if state == STATE_DISCONNECTED:
                         return
-                    count_missed_packets = 0
                     window_number = 0
             else:
                 print(f"missed packets: {missed_packets}")
                 print(sent_packets)
 
-                window_number = send_again(window_number)
-                count_missed_packets = len(missed_packets)
+                send_again()
 
-                allReceived = True
-                missed_packets = []
-                if window_number == 6 or (not data and window_number != 0):
-                    canISendFragments = False
-                    wait_for_ack()
-                    if state == STATE_DISCONNECTED:
-                        return
-                    window_number = 0
+                wait_for_ack()
+                if state == STATE_DISCONNECTED:
+                    return
 
 
     print("send FIN_FRAG, without ack")
@@ -375,7 +370,6 @@ def send_message(message, fragment_length, flag):
     sequence_number = -1
     window_number = 0
     position = -fragment_length
-    count_missed_packets = 0
 
     while position < len(message):
         if allReceived:
@@ -392,7 +386,7 @@ def send_message(message, fragment_length, flag):
 
             how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
 
-            acknowledgment_number = min(6 - count_missed_packets, how_much_left)
+            acknowledgment_number = min(6, how_much_left)
 
             send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
 
@@ -410,23 +404,16 @@ def send_message(message, fragment_length, flag):
                 wait_for_ack()
                 if state == STATE_DISCONNECTED:
                     return
-                count_missed_packets = 0
                 window_number = 0
         else:
             print(f"missed packets: {missed_packets}")
             print(sent_packets)
 
-            window_number = send_again(window_number)
-            count_missed_packets = len(missed_packets)
+            send_again()
 
-            allReceived = True
-            missed_packets = []
-            if window_number == 6 or (position + fragment_length >= len(message) and window_number != 0):
-                canISendFragments = False
-                wait_for_ack()
-                if state == STATE_DISCONNECTED:
-                    return
-                window_number = 0
+            wait_for_ack()
+            if state == STATE_DISCONNECTED:
+                return
 
     print("send FIN_FRAG, without ack")
     send_packet(TYPE_FIN_FRAG, packet_ID, 0, window_number)
@@ -521,7 +508,6 @@ def save_data(packet):
             if not check_file_exists(cur_filename):
                 filename = cur_filename
                 break
-
         # Save total message content to the determined filename
         with open(filename, "ab") as file:
             file.write(total_message[packet.packet_id])
