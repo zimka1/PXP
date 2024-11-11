@@ -64,7 +64,7 @@ class ParsedPacket:
     sequence_number: int  # Current fragment number or sequence number
     acknowledgment_number: int  # Total payload length
     checksum: int  # Checksum for error detection
-    payload: str  # Payload (message or data)
+    payload: bytes  # Payload (message or data)
 
 last_fragment_packet = None
 
@@ -78,7 +78,7 @@ packet_ID = 0
 canISendFragments = True
 allReceived = True
 fragments = [received_message("", 0, []) for _ in range(32768)]
-total_message = ["" for _ in range(32768)]
+total_message = [b"" for _ in range(32768)]
 
 
 def change_state(new_state):
@@ -93,15 +93,15 @@ def change_mode(new_mode):
 def create_packet(packet_flag, packet_id, sequence_number, acknowledgment_number, checksum, payload):
     packet = packet_flag.to_bytes(1, 'big')  # Packet type (1 byte)
     packet += packet_id.to_bytes(2, 'big')  # Packet ID (2 bytes)
-    packet += sequence_number.to_bytes(1, 'big')  # Sequence number (1 byte)
+    packet += sequence_number.to_bytes(2, 'big')  # Sequence number (1 byte)
     packet += acknowledgment_number.to_bytes(2, 'big')  # Total length (2 bytes)
     packet += checksum.to_bytes(2, 'big')  # Checksum (2 bytes)
-    packet += payload.encode('utf-8')
+    packet += payload
     return packet
 
 
 # Sends the packet to the remote node
-def send_packet(packet_flag, payload="", packet_id=0, sequence_number=0, acknowledgment_number=0, checksum=0):
+def send_packet(packet_flag, packet_id=0, sequence_number=0, acknowledgment_number=0, checksum=0, payload='0'.encode('utf-8')):
     packet = create_packet(packet_flag, packet_id, sequence_number, acknowledgment_number, checksum, payload)
     sock.sendto(packet, (remote_ip, remote_port))
 
@@ -110,10 +110,10 @@ def send_packet(packet_flag, payload="", packet_id=0, sequence_number=0, acknowl
 def parse_packet(packet):
     packet_flag = int.from_bytes(packet[0:1], 'big')  # Packet type (1 byte)
     packet_id = int.from_bytes(packet[1:3], 'big')  # Packet ID (2 bytes)
-    sequence_number = int.from_bytes(packet[3:4], 'big')  # Sequence number (1 byte)
-    acknowledgment_number = int.from_bytes(packet[4:6], 'big')
-    checksum = int.from_bytes(packet[6:8], 'big')  # Checksum (2 bytes)
-    payload = packet[8:].decode('utf-8')  # Payload (decoded as UTF-8)
+    sequence_number = int.from_bytes(packet[3:5], 'big')  # Sequence number (1 byte)
+    acknowledgment_number = int.from_bytes(packet[5:7], 'big')
+    checksum = int.from_bytes(packet[7:9], 'big')  # Checksum (2 bytes)
+    payload = packet[9:] # Payload (decoded as UTF-8)
 
     return ParsedPacket(
         packet_flag=packet_flag,
@@ -282,9 +282,9 @@ def send_again(window_number):
                 window_number += 1
                 print(
                     f"sent again: {parsed_sent_packet.payload} sequence: {sequence_number_of_missed_packet}")
-                send_packet(parsed_sent_packet.packet_flag, parsed_sent_packet.payload,
+                send_packet(parsed_sent_packet.packet_flag,
                             parsed_sent_packet.packet_id, parsed_sent_packet.sequence_number, 0,
-                            parsed_sent_packet.checksum)
+                            parsed_sent_packet.checksum, parsed_sent_packet.payload)
                 break
     return window_number
 
@@ -319,15 +319,15 @@ def send_file(file_name, fragment_length):
 
                 acknowledgment_number = min(6 - count_missed_packets, how_much_left)
                 print(acknowledgment_number)
-                send_packet(TYPE_MAKE_MONITOR, "", packet_ID, 0, acknowledgment_number)
+                send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
 
-                print(f"sent: {data.decode('utf-8')} sequence: {sequence_number} window: {window_number}")
+                print(f"sequence: {sequence_number} window: {window_number}")
 
                 if not should_drop_or_damage_packet(0.1):
-                    send_packet(TYPE_DATA, data.decode('utf-8'), packet_ID, sequence_number,0, crc if not should_drop_or_damage_packet(0.1) else damage_packet(crc))
+                    send_packet(TYPE_DATA, packet_ID, sequence_number,0, crc if not should_drop_or_damage_packet(0.1) else damage_packet(crc), data)
                 else:
                     print("Packet dropped!")
-                packet = create_packet(TYPE_DATA, packet_ID, sequence_number, 0, crc, data.decode('utf-8'))
+                packet = create_packet(TYPE_DATA, packet_ID, sequence_number, 0, crc, data)
                 sent_packets.append(packet)
 
                 data = file.read(fragment_length)
@@ -355,7 +355,7 @@ def send_file(file_name, fragment_length):
 
 
     print("send FIN_FRAG, without ack")
-    send_packet(TYPE_FIN_FRAG, "", packet_ID, 0, window_number)
+    send_packet(TYPE_FIN_FRAG, packet_ID, 0, window_number)
 
     sent_packets = []
 
@@ -379,8 +379,8 @@ def send_message(message, fragment_length, flag):
                 break
 
             position += fragment_length
-            fragment = message[position:min(position + fragment_length, len(message))]
-            crc = calculate_crc16(fragment.encode('utf-8'))
+            fragment = message[position:min(position + fragment_length, len(message))].encode('utf-8')
+            crc = calculate_crc16(fragment)
             sequence_number += 1
             window_number += 1
 
@@ -390,12 +390,12 @@ def send_message(message, fragment_length, flag):
 
             acknowledgment_number = min(6 - count_missed_packets, how_much_left)
 
-            send_packet(TYPE_MAKE_MONITOR, "", packet_ID, 0, acknowledgment_number)
+            send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
 
             print(f"sent: {fragment} sequence: {sequence_number}")
 
             if not should_drop_or_damage_packet(0.1):
-                send_packet(TYPE_FILENAME if flag == 'n' else TYPE_MESSAGE, fragment, packet_ID, sequence_number, 0, crc if not should_drop_or_damage_packet(0.1) else damage_packet(crc))
+                send_packet(TYPE_FILENAME if flag == 'n' else TYPE_MESSAGE, packet_ID, sequence_number, 0, crc if not should_drop_or_damage_packet(0.1) else damage_packet(crc), fragment)
             else:
                 print("Packet dropped!")
             packet = create_packet(TYPE_FILENAME if flag == 'n' else TYPE_MESSAGE, packet_ID, sequence_number, 0, crc, fragment)
@@ -421,7 +421,7 @@ def send_message(message, fragment_length, flag):
                 window_number = 0
 
     print("send FIN_FRAG, without ack")
-    send_packet(TYPE_FIN_FRAG, "", packet_ID, 0, window_number)
+    send_packet(TYPE_FIN_FRAG, packet_ID, 0, window_number)
 
     sent_packets = []
 
@@ -445,7 +445,7 @@ def checkIfSomethingIsWrong(packet):
         return
 
     if packet.packet_flag != TYPE_CHECK:
-        calculated_crc = calculate_crc16(packet.payload.encode('utf-8'))
+        calculated_crc = calculate_crc16(packet.payload)
         fragments[packet.packet_id].type = packet.packet_flag
 
         print(f"seq {packet.sequence_number}")
@@ -468,7 +468,7 @@ def checkIfSomethingIsWrong(packet):
             for i,fragment in enumerate(fragments[packet.packet_id].array):
                 if not fragment:
                     missed += str(i) + " "
-            send_packet(TYPE_NACK, missed, packet.packet_id, 0, 0, packet.checksum)
+            send_packet(TYPE_NACK, packet.packet_id, 0, 0, packet.checksum, missed.encode('utf-8'))
 
 
 def should_wait_for_fragment():
@@ -476,7 +476,7 @@ def should_wait_for_fragment():
     while True:
         if first_fragment_come:
             current_time = time.time()
-            while current_time - time_fragment_come < 2:
+            while current_time - time_fragment_come < 1:
                 if not first_fragment_come:
                     break
                 current_time = time.time()
@@ -495,12 +495,12 @@ def check_file_exists(file_path):
 def save_data(packet):
     global first_fragment_come
 
-    total_message[packet.packet_id] += ''.join(frag for frag in fragments[packet.packet_id].array)
+    total_message[packet.packet_id] += b''.join(frag for frag in fragments[packet.packet_id].array)
 
     if fragments[packet.packet_id].type == TYPE_FILENAME:
-        fragments[packet.packet_id].filename = total_message[packet.packet_id]
+        fragments[packet.packet_id].filename = total_message[packet.packet_id].decode('utf-8')
     if fragments[packet.packet_id].type == TYPE_MESSAGE:
-        print(f"You got message: {total_message[packet.packet_id]}")
+        print(f"You got message: {total_message[packet.packet_id].decode('utf-8')}")
     elif fragments[packet.packet_id].type == TYPE_DATA:
         # Generate unique filename for received file
         filename = ""
@@ -515,13 +515,13 @@ def save_data(packet):
                 break
 
         # Save total message content to the determined filename
-        with open(filename, "a") as file:
+        with open(filename, "ab") as file:
             file.write(total_message[packet.packet_id])
 
         print(f"You got file: {fragments[packet.packet_id].filename}")
 
     # Reset total message and fragments after saving
-    total_message[packet.packet_id] = ""
+    total_message[packet.packet_id] = b""
     if fragments[packet.packet_id].type == TYPE_FILENAME:
         fragments[packet.packet_id] = received_message(fragments[packet.packet_id].filename, TYPE_DATA, [])
 
@@ -545,7 +545,7 @@ def receive_message():
         if packet.packet_flag == TYPE_NACK:
             canISendFragments = True
             allReceived = False
-            missed_packets = [int(c) for c in packet.payload.split(' ') if c.strip()]
+            missed_packets = [int(c) for c in packet.payload.decode('utf-8').split(' ') if c.strip()]
             continue
 
         # Handle incoming SYN packet (connection request)
