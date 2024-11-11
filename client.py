@@ -262,7 +262,7 @@ def calculate_crc16(data: bytes) -> int:
 def wait_for_ack():
     # Loop until fragments can be sent
     while True:
-        if canISendFragments:
+        if canISendFragments or state == STATE_DISCONNECTED:
             break
 
 
@@ -337,6 +337,8 @@ def send_file(file_name, fragment_length):
                 if window_number == 6 or (not data and window_number != 0):
                     canISendFragments = False
                     wait_for_ack()
+                    if state == STATE_DISCONNECTED:
+                        return
                     count_missed_packets = 0
                     window_number = 0
             else:
@@ -351,6 +353,8 @@ def send_file(file_name, fragment_length):
                 if window_number == 6 or (not data and window_number != 0):
                     canISendFragments = False
                     wait_for_ack()
+                    if state == STATE_DISCONNECTED:
+                        return
                     window_number = 0
 
 
@@ -404,6 +408,8 @@ def send_message(message, fragment_length, flag):
             if window_number == 6 or (position + fragment_length >= len(message) and window_number != 0):
                 canISendFragments = False
                 wait_for_ack()
+                if state == STATE_DISCONNECTED:
+                    return
                 count_missed_packets = 0
                 window_number = 0
         else:
@@ -418,6 +424,8 @@ def send_message(message, fragment_length, flag):
             if window_number == 6 or (position + fragment_length >= len(message) and window_number != 0):
                 canISendFragments = False
                 wait_for_ack()
+                if state == STATE_DISCONNECTED:
+                    return
                 window_number = 0
 
     print("send FIN_FRAG, without ack")
