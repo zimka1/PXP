@@ -20,20 +20,19 @@ LOSS_MODE = "LOSS"
 
 # Packet's types
 TYPE_MESSAGE = 0x01  # Packet type: message
-TYPE_ACK = 0x02  # Packet type: ACK (acknowledgment)
-TYPE_SYN = 0x03  # Packet type: SYN (connection request)
-TYPE_SYN_ACK = 0x04  # Packet type: SYN-ACK (response to SYN)
-TYPE_FIN = 0x05  # Packet type: FIN (connection termination request)
-TYPE_FIN_ACK = 0x06  # Packet type: FIN-ACK (final acknowledgment for FIN)
-TYPE_HEARTBEAT = 0x07  # Packet type: HEARTBEAT (keep-alive signal)
-TYPE_HEARTBEAT_ACK = 0x08  # Packet type: HEARTBEAT-ACK (acknowledgment for HEARTBEAT)
-TYPE_NACK = 0x09  # Packet type: NACK (negative acknowledgment)
-TYPE_DATA = 0x0A  # Packet type: DATA (file or data transmission)
-TYPE_FILENAME = 0x0B
-TYPE_FIN_FRAG = 0x0C
-TYPE_MAKE_MONITOR = 0x0D
-TYPE_ERROR = 0x0E
-
+TYPE_DATA = 0x02  # Packet type: DATA (file or data transmission)
+TYPE_FILENAME = 0x03
+TYPE_MAKE_MONITOR = 0x04
+TYPE_FIN_FRAG = 0x05
+TYPE_CHECK = 0x06
+TYPE_ACK = 0x07  # Packet type: ACK (acknowledgment)
+TYPE_NACK = 0x08  # Packet type: NACK (negative acknowledgment)
+TYPE_SYN = 0x09  # Packet type: SYN (connection request)
+TYPE_SYN_ACK = 0x0A  # Packet type: SYN-ACK (response to SYN)
+TYPE_FIN = 0x0B  # Packet type: FIN (connection termination request)
+TYPE_FIN_ACK = 0x0C  # Packet type: FIN-ACK (final acknowledgment for FIN)
+TYPE_HEARTBEAT = 0x0D  # Packet type: HEARTBEAT (keep-alive signal)
+TYPE_HEARTBEAT_ACK = 0x0E  # Packet type: HEARTBEAT-ACK (acknowledgment for HEARTBEAT)
 
 state = STATE_DISCONNECTED  # Initial state
 mode = ORDINARY_MODE # Initial mode
@@ -42,7 +41,7 @@ heartbeat_interval = 5
 heartbeat_interval_to_ans = 2
 max_missed_heartbeats = 3
 heartbeat_missed = 0
-heartbeat_received = 0
+heartbeat_received = False
 areYouAFK = 1
 
 sent_packets = []
@@ -50,7 +49,6 @@ missed_packets = []
 first_fragment_come = False
 time_fragment_come = time.time()
 dont_should_wait = True
-
 
 # Mutex for preventing simultaneous execution
 lock = threading.Lock()
@@ -70,20 +68,17 @@ class ParsedPacket:
 
 last_fragment_packet = None
 
-
 @dataclass
 class received_message:
     filename: str
     type: int
     array: List = field(default_factory=list)
 
-
 packet_ID = 0
 canISendFragments = True
 allReceived = True
 fragments = [received_message("", 0, []) for _ in range(32768)]
 total_message = ["" for _ in range(32768)]
-
 
 
 def change_state(new_state):
@@ -238,7 +233,7 @@ def heartbeat_monitor():
         else:
             heartbeat_missed += 1  # Increment missed heartbeats count
 
-        heartbeat_received = 0
+        heartbeat_received = False
 
         if heartbeat_missed >= max_missed_heartbeats:
             print("Connection lost. No response from the partner.")
@@ -309,9 +304,6 @@ def send_file(file_name, fragment_length):
 
     send_message(file_name, len(file_name) if total_length == fragment_length else fragment_length, 'n')
 
-
-
-
     with open(file_name, "rb") as file:
         data = file.read(fragment_length)
         while True:
@@ -332,10 +324,7 @@ def send_file(file_name, fragment_length):
                 print(f"sent: {data.decode('utf-8')} sequence: {sequence_number} window: {window_number}")
 
                 if not should_drop_or_damage_packet(0.1):
-                    if not should_drop_or_damage_packet(0.1):
-                        send_packet(TYPE_DATA, data.decode('utf-8'), packet_ID, sequence_number,0, crc)
-                    else:
-                        send_packet(TYPE_DATA, data.decode('utf-8'), packet_ID, sequence_number,0, damage_packet(crc))
+                    send_packet(TYPE_DATA, data.decode('utf-8'), packet_ID, sequence_number,0, crc if not should_drop_or_damage_packet(0.1) else damage_packet(crc))
                 else:
                     print("Packet dropped!")
                 packet = create_packet(TYPE_DATA, packet_ID, sequence_number, 0, crc, data.decode('utf-8'))
@@ -442,14 +431,12 @@ def send_message(message, fragment_length, flag):
         print("Partner has received all fragments of filename!")
 
 
-
-
-
 def check_fragments(frags_array):
     for fragment in frags_array:
         if not fragment:
             return False
     return True
+
 
 def checkIfSomethingIsWrong(packet):
     if packet.packet_flag == TYPE_MAKE_MONITOR:
@@ -457,7 +444,7 @@ def checkIfSomethingIsWrong(packet):
             fragments[packet.packet_id].array.extend([None] * packet.acknowledgment_number)
         return
 
-    if packet.packet_flag != TYPE_ERROR:
+    if packet.packet_flag != TYPE_CHECK:
         calculated_crc = calculate_crc16(packet.payload.encode('utf-8'))
         fragments[packet.packet_id].type = packet.packet_flag
 
@@ -473,7 +460,7 @@ def checkIfSomethingIsWrong(packet):
 
     print(fragments[packet.packet_id].array)
 
-    if packet.packet_flag == TYPE_ERROR:
+    if packet.packet_flag == TYPE_CHECK:
         if check_fragments(fragments[packet.packet_id].array):
             send_packet(TYPE_ACK)
         else:
@@ -495,9 +482,10 @@ def should_wait_for_fragment():
                 current_time = time.time()
             if first_fragment_come:
                 print("send Error!")
-                packet = ParsedPacket(TYPE_ERROR, last_fragment_packet.packet_id, 0, 0, 0, "")
+                packet = ParsedPacket(TYPE_CHECK, last_fragment_packet.packet_id, 0, 0, 0, "")
                 checkIfSomethingIsWrong(packet)
                 first_fragment_come = False
+
 
 def check_file_exists(file_path):
     # Check if file exists at the given path
@@ -541,7 +529,6 @@ def save_data(packet):
 # Receives packets and handles the protocol logic for various packet types
 def receive_message():
     global heartbeat_received, allReceived, canISendFragments, areYouAFK, last_fragment_packet, time_fragment_come, first_fragment_come, missed_packets
-
 
     while True:
         data, addr = sock.recvfrom(1024)  # Receive packet
@@ -589,7 +576,7 @@ def receive_message():
             continue
 
         if packet.packet_flag == TYPE_HEARTBEAT_ACK and state == STATE_CONNECTED:
-            heartbeat_received = 1  # Acknowledge received heartbeat
+            heartbeat_received = True  # Acknowledge received heartbeat
             continue
         elif packet.packet_flag == TYPE_HEARTBEAT_ACK:
             continue
@@ -604,7 +591,6 @@ def receive_message():
         if packet.packet_flag == TYPE_FIN_FRAG:
             first_fragment_come = False
             save_data(packet)
-
 
 
 def handle_commands():
@@ -670,8 +656,10 @@ def handle_commands():
 
         areYouAFK = 0
 
+
 def add_task_to_queue(task, *args):
     message_queue.put((task, args))
+
 
 def process_message_queue():
     while True:
