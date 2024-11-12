@@ -81,6 +81,13 @@ fragments = [received_message("", 0, []) for _ in range(32768)]
 total_message = [b"" for _ in range(32768)]
 
 
+window_size = 0
+max_window_size = 0
+min_window_size = 6
+alpha = 0
+beta = 0
+
+
 def change_state(new_state):
     global state
     state = new_state
@@ -93,9 +100,9 @@ def change_mode(new_mode):
 def create_packet(packet_flag, packet_id, sequence_number, acknowledgment_number, checksum, payload):
     packet = packet_flag.to_bytes(1, 'big')  # Packet type (1 byte)
     packet += packet_id.to_bytes(2, 'big')  # Packet ID (2 bytes)
-    packet += sequence_number.to_bytes(2, 'big')  # Sequence number (1 byte)
-    packet += acknowledgment_number.to_bytes(2, 'big')  # Total length (2 bytes)
-    packet += checksum.to_bytes(2, 'big')  # Checksum (2 bytes)
+    packet += sequence_number.to_bytes(3, 'big')  # Sequence number (3 byte)
+    packet += acknowledgment_number.to_bytes(3, 'big')  # Total length (3 bytes)
+    packet += checksum.to_bytes(4, 'big')  # Checksum (3 bytes)
     packet += payload
     return packet
 
@@ -110,10 +117,10 @@ def send_packet(packet_flag, packet_id=0, sequence_number=0, acknowledgment_numb
 def parse_packet(packet):
     packet_flag = int.from_bytes(packet[0:1], 'big')  # Packet type (1 byte)
     packet_id = int.from_bytes(packet[1:3], 'big')  # Packet ID (2 bytes)
-    sequence_number = int.from_bytes(packet[3:5], 'big')  # Sequence number (1 byte)
-    acknowledgment_number = int.from_bytes(packet[5:7], 'big')
-    checksum = int.from_bytes(packet[7:9], 'big')  # Checksum (2 bytes)
-    payload = packet[9:] # Payload (decoded as UTF-8)
+    sequence_number = int.from_bytes(packet[3:6], 'big')  # Sequence number (1 byte)
+    acknowledgment_number = int.from_bytes(packet[6:9], 'big')
+    checksum = int.from_bytes(packet[9:13], 'big')  # Checksum (4 bytes)
+    payload = packet[13:] # Payload (decoded as UTF-8)
 
     return ParsedPacket(
         packet_flag=packet_flag,
@@ -242,21 +249,21 @@ def heartbeat_monitor():
             break
 
 
-def calculate_crc16(data: bytes) -> int:
-    # Initialize CRC and define polynomial
-    crc = 0xFFFF
-    polynomial = 0x1021
+def calculate_crc32(data: bytes) -> int:
+    # Initialize CRC and polynomial for 32-bit
+    crc = 0xFFFFFFFF  # Инициализация 32-битного значения CRC
+    polynomial = 0x04C11DB7  # Стандартный полином для CRC32
 
-    # Iterate over each byte in data
+    # Process each byte in the data
     for byte in data:
-        crc ^= byte << 8  # XOR with each byte
+        crc ^= byte << 24  # XOR с каждым байтом, сдвинутым на 24 бита
         for _ in range(8):
-            # Check if the most significant bit is 1
-            if crc & 0x8000:
+            if crc & 0x80000000:  # Если старший бит (32-й) равен 1
                 crc = (crc << 1) ^ polynomial
             else:
                 crc <<= 1
-            crc &= 0xFFFF  # Ensure it's a 16-bit value
+            crc &= 0xFFFFFFFF  # Обеспечение 32-битного значения
+
     return crc
 
 def wait_for_ack():
@@ -275,10 +282,11 @@ def damage_packet(crc):
 
 def send_again():
     global allReceived, missed_packets, canISendFragments
+    time.sleep(0.5)
     for sequence_number_of_missed_packet in missed_packets:
         for sent_packet in sent_packets:
             parsed_sent_packet = parse_packet(sent_packet)
-            print(parsed_sent_packet)
+            # print(parsed_sent_packet)
             if parsed_sent_packet.sequence_number == sequence_number_of_missed_packet:
                 print(
                     f"sent again: {parsed_sent_packet.payload} sequence: {sequence_number_of_missed_packet}")
@@ -291,6 +299,28 @@ def send_again():
     missed_packets = []
 
     canISendFragments = False
+
+def on_successful_ack():
+    global window_size
+    if window_size <= max_window_size:
+        window_size = min(int(window_size + alpha), max_window_size)
+
+def on_packet_loss():
+    global window_size
+    window_size = max(int(window_size - beta), min_window_size)
+
+def set_window_settings(total_length, fragment_length):
+    global max_window_size, min_window_size, window_size, alpha, beta
+
+    min_window_size = max(math.ceil(0.1 * math.ceil(total_length / fragment_length)), 6)
+
+    max_window_size = max(math.ceil(0.5 * math.ceil(total_length / fragment_length)), min_window_size)
+
+    alpha = math.ceil(0.125 * math.ceil(total_length / fragment_length))
+    beta = math.ceil(0.125 * math.ceil(total_length / fragment_length))
+
+    window_size = min_window_size
+    print(window_size, max_window_size, min_window_size)
 
 def send_file(file_name, fragment_length):
     global packet_ID, state, canISendFragments, allReceived, missed_packets, sent_packets
@@ -306,6 +336,8 @@ def send_file(file_name, fragment_length):
 
     send_message(file_name, len(file_name) if total_length == fragment_length else fragment_length, 'n')
 
+    set_window_settings(total_length, fragment_length)
+
     with open(file_name, "rb") as file:
         data = file.read(fragment_length)
         while True:
@@ -313,17 +345,17 @@ def send_file(file_name, fragment_length):
                 if not data:
                     break
 
-                crc = calculate_crc16(data)
+                crc = calculate_crc32(data)
                 sequence_number += 1
                 window_number += 1
 
                 how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
 
-                acknowledgment_number = min(6, how_much_left)
+                acknowledgment_number = min(window_size, how_much_left)
                 print(acknowledgment_number)
                 send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
 
-                print(f"sequence: {sequence_number} window: {window_number}")
+                print(f"sequence: {sequence_number} window: {window_number} checksum: {crc}")
 
                 if not should_drop_or_damage_packet(0.1):
                     send_packet(TYPE_DATA, packet_ID, sequence_number,0, crc if not should_drop_or_damage_packet(0.1) else damage_packet(crc), data)
@@ -336,12 +368,16 @@ def send_file(file_name, fragment_length):
 
                 print(data)
 
-                if window_number == 6 or (not data and window_number != 0):
+                if window_number == window_size or (not data and window_number != 0):
                     canISendFragments = False
                     wait_for_ack()
                     if state == STATE_DISCONNECTED:
                         return
                     window_number = 0
+                    if allReceived:
+                        on_successful_ack()
+                    else:
+                        on_packet_loss()
             else:
                 print(f"missed packets: {missed_packets}")
                 print(sent_packets)
@@ -371,22 +407,25 @@ def send_message(message, fragment_length, flag):
     window_number = 0
     position = -fragment_length
 
-    while position < len(message):
+    total_length = len(message)
+
+    set_window_settings(total_length, fragment_length)
+
+    while position < total_length:
         if allReceived:
-            if position + fragment_length >= len(message):
+            if position + fragment_length >= total_length:
                 break
 
             position += fragment_length
-            fragment = message[position:min(position + fragment_length, len(message))].encode('utf-8')
-            crc = calculate_crc16(fragment)
+            fragment = message[position:min(position + fragment_length, total_length)].encode('utf-8')
+            crc = calculate_crc32(fragment)
             sequence_number += 1
             window_number += 1
 
-            total_length = len(message)
 
             how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
 
-            acknowledgment_number = min(6, how_much_left)
+            acknowledgment_number = min(window_size, how_much_left)
 
             send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
 
@@ -399,15 +438,19 @@ def send_message(message, fragment_length, flag):
             packet = create_packet(TYPE_FILENAME if flag == 'n' else TYPE_MESSAGE, packet_ID, sequence_number, 0, crc, fragment)
             sent_packets.append(packet)
 
-            if window_number == 6 or (position + fragment_length >= len(message) and window_number != 0):
+            if window_number == window_size or (position + fragment_length >= total_length and window_number != 0):
                 canISendFragments = False
                 wait_for_ack()
                 if state == STATE_DISCONNECTED:
                     return
                 window_number = 0
+                if allReceived:
+                    on_successful_ack()
+                else:
+                    on_packet_loss()
         else:
             print(f"missed packets: {missed_packets}")
-            print(sent_packets)
+            # print(sent_packets)
 
             send_again()
 
@@ -434,26 +477,25 @@ def check_fragments(frags_array):
 
 
 def checkIfSomethingIsWrong(packet):
+    global first_fragment_come
+
     if packet.packet_flag == TYPE_MAKE_MONITOR:
         if None not in fragments[packet.packet_id].array:
             fragments[packet.packet_id].array.extend([None] * packet.acknowledgment_number)
         return
 
     if packet.packet_flag != TYPE_CHECK:
-        calculated_crc = calculate_crc16(packet.payload)
+        calculated_crc = calculate_crc32(packet.payload)
         fragments[packet.packet_id].type = packet.packet_flag
 
         print(f"seq {packet.sequence_number}")
-
-        print(fragments[packet.packet_id].array)
 
         if calculated_crc == packet.checksum:
             print(calculated_crc, packet.checksum)
             fragments[packet.packet_id].array[packet.sequence_number] = packet.payload
         else:
             print(f"Fragment {packet.sequence_number} is damaged")
-
-    print(fragments[packet.packet_id].array)
+            print(calculated_crc, packet.checksum)
 
     if packet.packet_flag == TYPE_CHECK:
         if check_fragments(fragments[packet.packet_id].array):
@@ -476,10 +518,11 @@ def should_wait_for_fragment():
                     break
                 current_time = time.time()
             if first_fragment_come:
-                print("send Error!")
-                packet = ParsedPacket(TYPE_CHECK, last_fragment_packet.packet_id, 0, 0, 0, "")
+                print("send Check!")
+                packet = ParsedPacket(TYPE_CHECK, last_fragment_packet.packet_id, 0, 0, 0, "0".encode('utf-8'))
                 checkIfSomethingIsWrong(packet)
                 first_fragment_come = False
+
 
 
 def check_file_exists(file_path):
@@ -525,7 +568,7 @@ def receive_message():
     global heartbeat_received, allReceived, canISendFragments, areYouAFK, last_fragment_packet, time_fragment_come, first_fragment_come, missed_packets
 
     while True:
-        data, addr = sock.recvfrom(1024)  # Receive packet
+        data, addr = sock.recvfrom(1500)  # Receive packet
 
         areYouAFK = 0
 
@@ -579,6 +622,7 @@ def receive_message():
             last_fragment_packet = packet
             first_fragment_come = True
             time_fragment_come = time.time()
+            print(f"VAAAAA {first_fragment_come}")
             checkIfSomethingIsWrong(packet)
             continue
 
