@@ -8,6 +8,13 @@ import random
 from typing import List
 import math
 
+
+blue_text = "\033[94m"
+reset_text = "\033[0m"
+red_text = "\033[91m"
+yellow_text = "\033[93m"
+green_text = "\033[92m"
+
 # Defining states
 STATE_DISCONNECTED = "DISCONNECTED"  # State: disconnected
 STATE_WAIT_SYN_ACK = "WAIT_SYN_ACK"  # State: waiting for SYN-ACK
@@ -20,7 +27,7 @@ LOSS_MODE = "LOSS"
 
 # Packet's types
 TYPE_MESSAGE = 0x01  # Packet type: message
-TYPE_DATA = 0x02  # Packet type: DATA (file or data transmission)
+TYPE_FILE = 0x02  # Packet type: DATA (file or data transmission)
 TYPE_FILENAME = 0x03
 TYPE_MAKE_MONITOR = 0x04
 TYPE_FIN_FRAG = 0x05
@@ -52,35 +59,12 @@ first_fragment_come = False
 time_fragment_come = time.time()
 dont_should_wait = True
 
-# Mutex for preventing simultaneous execution
-lock = threading.Lock()
-
-# Message queue for sending messages
-message_queue = Queue()
-
-
-@dataclass
-class ParsedPacket:
-    packet_flag: int  # Packet type
-    packet_id: int  # Unique packet identifier
-    sequence_number: int  # Current fragment number or sequence number
-    acknowledgment_number: int  # Total payload length
-    checksum: int  # Checksum for error detection
-    payload: bytes  # Payload (message or data)
-
+packet_ID = -1
 last_fragment_packet = None
-
-@dataclass
-class received_message:
-    filename: str
-    type: int
-    array: List = field(default_factory=list)
-
-packet_ID = 0
 canISendFragments = True
 allReceived = True
-fragments = [received_message("", 0, []) for _ in range(32768)]
-total_message = [b"" for _ in range(32768)]
+fragments = []
+total_data = []
 max_value_of_fragment = 1450
 
 window_size = 0
@@ -89,12 +73,28 @@ min_window_size = 6
 alpha = 0
 beta = 0
 
+# Mutex for preventing simultaneous execution
+lock = threading.Lock()
 
-blue_text = "\033[94m"
-reset_text = "\033[0m"
-red_text = "\033[91m"
-yellow_text = "\033[93m"
-green_text = "\033[92m"
+# Message queue for sending messages
+message_queue = Queue()
+
+@dataclass
+class TransferredData:
+    filename: str
+    type: int
+    arrayOfFragments: List = field(default_factory=list)
+
+@dataclass
+class ParsedPacket:
+    packet_flag: int  # Packet type
+    packet_id: int  # Unique packet identifier
+    sequence_number: int  # Current fragment number
+    acknowledgment_number: int
+    checksum: int  # Checksum for error detection
+    payload: bytes  # Payload (message or data)
+
+
 
 
 def change_state(new_state):
@@ -365,11 +365,11 @@ def send_file(file_path, fragment_length):
                 print(f"{blue_text}File name:{reset_text} {file_name}, {blue_text}Total length:{reset_text} {total_length}, {blue_text}Number of sent fragments:{reset_text} {sequence_number} {blue_text}Fragment length:{reset_text} {len(data)}, {blue_text}Current size of window: {reset_text}{window_size}, {blue_text}Fragment number in the window: {reset_text}{window_number}")
 
                 if not should_drop_or_damage_packet(0.1):
-                    send_packet(TYPE_DATA, packet_ID, sequence_number,0, crc if not should_drop_or_damage_packet(0.1) else damage_packet(crc), data)
+                    send_packet(TYPE_FILE, packet_ID, sequence_number,0, crc if not should_drop_or_damage_packet(0.1) else damage_packet(crc), data)
                 else:
                     print(f"{red_text}Attention!!!{reset_text} Fragment {sequence_number} dropped!{reset_text}")
 
-                packet = create_packet(TYPE_DATA, packet_ID, sequence_number, 0, crc, data)
+                packet = create_packet(TYPE_FILE, packet_ID, sequence_number, 0, crc, data)
                 sent_packets.append(packet)
 
                 data = file.read(fragment_length)
@@ -482,12 +482,16 @@ def check_fragments(frags_array):
 def checkIfSomethingIsWrong(packet):
     global first_fragment_come, start_sending
 
+    if packet.packet_id + 1 > len(fragments):
+        fragments.append(TransferredData("", 0, []))
+        total_data.append(b"")
+
     if not start_sending:
         start_sending = time.time()
 
     if packet.packet_flag == TYPE_MAKE_MONITOR:
-        if None not in fragments[packet.packet_id].array:
-            fragments[packet.packet_id].array.extend([None] * packet.acknowledgment_number)
+        if None not in fragments[packet.packet_id].arrayOfFragments:
+            fragments[packet.packet_id].arrayOfFragments.extend([None] * packet.acknowledgment_number)
         return
 
     if packet.packet_flag != TYPE_CHECK:
@@ -496,16 +500,16 @@ def checkIfSomethingIsWrong(packet):
 
         if calculated_crc == packet.checksum:
             print(f"{blue_text}Number of fragment: {reset_text}{packet.sequence_number}, {blue_text}Status: {green_text}successful")
-            fragments[packet.packet_id].array[packet.sequence_number] = packet.payload
+            fragments[packet.packet_id].arrayOfFragments[packet.sequence_number] = packet.payload
         else:
             print(f"{blue_text}Number of fragment: {reset_text}{packet.sequence_number}, {blue_text}Status: {red_text}unsuccessful")
 
     if packet.packet_flag == TYPE_CHECK:
-        if check_fragments(fragments[packet.packet_id].array):
+        if check_fragments(fragments[packet.packet_id].arrayOfFragments):
             send_packet(TYPE_ACK)
         else:
             missed = ""
-            for i,fragment in enumerate(fragments[packet.packet_id].array):
+            for i,fragment in enumerate(fragments[packet.packet_id].arrayOfFragments):
                 if not fragment:
                     missed += str(i) + " "
             send_packet(TYPE_NACK, packet.packet_id, 0, 0, packet.checksum, missed.encode('utf-8'))
@@ -535,47 +539,53 @@ def check_file_exists(file_path):
 def save_data(packet):
     global first_fragment_come, end_sending
 
-    total_message[packet.packet_id] += b''.join(frag for frag in fragments[packet.packet_id].array)
+    total_data[packet.packet_id] += b''.join(frag for frag in fragments[packet.packet_id].arrayOfFragments)
 
     if fragments[packet.packet_id].type == TYPE_FILENAME:
-        fragments[packet.packet_id].filename = total_message[packet.packet_id].decode('utf-8')
+        fragments[packet.packet_id].filename = total_data[packet.packet_id].decode('utf-8')
     if fragments[packet.packet_id].type == TYPE_MESSAGE:
-        print(f"{green_text}The transfer was successful. {blue_text}Duration of the transfer: {reset_text}{end_sending - start_sending}, {blue_text}Total length: {reset_text}{len(total_message[packet.packet_id])}")
+        print(f"{green_text}The transfer was successful. {blue_text}Duration of the transfer: {reset_text}{end_sending - start_sending}, {blue_text}Total length: {reset_text}{len(total_data[packet.packet_id])}")
         print(f"{blue_text}You got text message:{reset_text}")
-        print(f"{total_message[packet.packet_id].decode('utf-8')}")
+        print(f"{total_data[packet.packet_id].decode('utf-8')}")
 
-    elif fragments[packet.packet_id].type == TYPE_DATA:
+    elif fragments[packet.packet_id].type == TYPE_FILE:
         # Ensure the directory 'saved messages' exists
         output_directory = "saved_messages"
         if not os.path.exists(output_directory):
             os.makedirs(output_directory)
+
         # Generate unique filename for received file
         filename = ""
-        for i in range(32768):
-            name, filetype = fragments[packet.packet_id].filename.split('.')
-            if not i:
+        is_filename_found = False
+        file_number = 0
+        name, filetype = fragments[packet.packet_id].filename.split('.')
+
+        while not is_filename_found:
+            if not file_number:
                 cur_filename = os.path.join(output_directory, "received_" + name + '.' + filetype)
             else:
-                cur_filename = os.path.join(output_directory, "received_" + name + "_" + str(i) + '.' + filetype)
+                cur_filename = os.path.join(output_directory, "received_" + name + "_" + str(file_number) + '.' + filetype)
             if not check_file_exists(cur_filename):
                 filename = cur_filename
-                break
+                is_filename_found = True
+            file_number += 1
+
         # Save total message content to the determined filename
         with open(filename, "ab") as file:
-            file.write(total_message[packet.packet_id])
+            file.write(total_data[packet.packet_id])
 
         end_sending = time.time()
 
-        print(f"{green_text}The transfer was successful. {blue_text}Duration of the transfer: {reset_text}{end_sending - start_sending}, {blue_text}Total length: {reset_text}{len(total_message[packet.packet_id])}, {blue_text}Path: {reset_text}{filename}")
+        print(f"{green_text}The transfer was successful. {blue_text}Duration of the transfer: {reset_text}{end_sending - start_sending}, {blue_text}Total length: {reset_text}{len(total_data[packet.packet_id])}, {blue_text}Path: {reset_text}{filename}")
 
     # Reset total message and fragments after saving
-    total_message[packet.packet_id] = b""
+    total_data[packet.packet_id] = b""
     if fragments[packet.packet_id].type == TYPE_FILENAME:
-        fragments[packet.packet_id] = received_message(fragments[packet.packet_id].filename, TYPE_DATA, [])
+        fragments[packet.packet_id] = TransferredData(fragments[packet.packet_id].filename, TYPE_FILE, [])
 
 
 # Receives packets and handles the protocol logic for various packet types
-def receive_message():
+def receive_packet():
     global heartbeat_received, allReceived, canISendFragments, areYouAFK, last_fragment_packet, time_fragment_come, first_fragment_come, missed_packets
 
     while True:
@@ -629,7 +639,7 @@ def receive_message():
         elif packet.packet_flag == TYPE_HEARTBEAT_ACK:
             continue
 
-        if packet.packet_flag == TYPE_DATA or packet.packet_flag == TYPE_MESSAGE or packet.packet_flag == TYPE_FILENAME or packet.packet_flag == TYPE_MAKE_MONITOR:
+        if packet.packet_flag == TYPE_FILE or packet.packet_flag == TYPE_MESSAGE or packet.packet_flag == TYPE_FILENAME or packet.packet_flag == TYPE_MAKE_MONITOR:
             last_fragment_packet = packet
             first_fragment_come = True
             time_fragment_come = time.time()
@@ -733,7 +743,7 @@ print(f"Sending messages to {remote_ip}:{remote_port}")
 sock.bind(("", local_port))
 
 # Thread for receiving messages
-receive_thread = threading.Thread(target=receive_message, args=())
+receive_thread = threading.Thread(target=receive_packet, args=())
 receive_thread.daemon = True
 receive_thread.start()
 
