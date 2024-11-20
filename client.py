@@ -8,6 +8,20 @@ import random
 from typing import List
 import math
 
+@dataclass
+class TransferredData:
+    filename: str
+    type: int
+    arrayOfFragments: List = field(default_factory=list)
+
+@dataclass
+class ParsedPacket:
+    packet_flag: int = 0  # Packet type
+    packet_id: int = 0  # Unique packet identifier
+    sequence_number: int = 0  # Current fragment number
+    acknowledgment_number: int = 0 # Window size
+    checksum: int = 0  # Checksum for error detection
+    payload: bytes = field(default_factory=lambda: bytes())  # Payload (message or data)
 
 blue_text = "\033[94m"
 reset_text = "\033[0m"
@@ -43,6 +57,7 @@ TYPE_HEARTBEAT_ACK = 0x0E  # Packet type: HEARTBEAT-ACK (acknowledgment for HEAR
 
 state = STATE_DISCONNECTED  # Initial state
 mode = ORDINARY_MODE # Initial mode
+save_repository_path = "saved_messages"
 
 heartbeat_interval = 5
 heartbeat_interval_to_ans = 2
@@ -55,12 +70,12 @@ start_sending = 0
 end_sending = 0
 sent_packets = []
 missed_packets = []
-first_fragment_come = False
+fragment_come = False
 time_fragment_come = time.time()
 dont_should_wait = True
 
 packet_ID = -1
-last_fragment_packet = None
+last_fragment_packet = ParsedPacket()
 canISendFragments = True
 allReceived = True
 fragments = []
@@ -79,23 +94,6 @@ lock = threading.Lock()
 # Message queue for sending messages
 message_queue = Queue()
 
-@dataclass
-class TransferredData:
-    filename: str
-    type: int
-    arrayOfFragments: List = field(default_factory=list)
-
-@dataclass
-class ParsedPacket:
-    packet_flag: int  # Packet type
-    packet_id: int  # Unique packet identifier
-    sequence_number: int  # Current fragment number
-    acknowledgment_number: int
-    checksum: int  # Checksum for error detection
-    payload: bytes  # Payload (message or data)
-
-
-
 
 def change_state(new_state):
     global state
@@ -108,7 +106,7 @@ def change_mode(new_mode):
 # Creates the packet with specified parameters and encodes it to bytes
 def create_packet(packet_flag, packet_id, sequence_number, acknowledgment_number, checksum, payload):
     packet = packet_flag.to_bytes(1, 'big')  # Packet type (1 byte)
-    packet += packet_id.to_bytes(2, 'big')  # Packet ID (2 bytes)
+    packet += packet_id.to_bytes(3, 'big')  # Packet ID (3 bytes)
     packet += sequence_number.to_bytes(4, 'big')  # Sequence number (4 byte)
     packet += acknowledgment_number.to_bytes(4, 'big')  # Acknowledgment number (4 bytes)
     packet += checksum.to_bytes(4, 'big')  # Checksum (3 bytes)
@@ -125,11 +123,11 @@ def send_packet(packet_flag, packet_id=0, sequence_number=0, acknowledgment_numb
 # Parses the received packet and extracts the header and payload information
 def parse_packet(packet):
     packet_flag = int.from_bytes(packet[0:1], 'big')  # Packet type (1 byte)
-    packet_id = int.from_bytes(packet[1:3], 'big')  # Packet ID (2 bytes)
-    sequence_number = int.from_bytes(packet[3:7], 'big')  # Sequence number (4 byte)
-    acknowledgment_number = int.from_bytes(packet[7:11], 'big') # Acknowledgment number (4 bytes)
-    checksum = int.from_bytes(packet[11:15], 'big')  # Checksum (4 bytes)
-    payload = packet[15:] # Payload (decoded as UTF-8)
+    packet_id = int.from_bytes(packet[1:4], 'big')  # Packet ID (3 bytes)
+    sequence_number = int.from_bytes(packet[4:8], 'big')  # Sequence number (4 byte)
+    acknowledgment_number = int.from_bytes(packet[8:12], 'big') # Acknowledgment number (4 bytes)
+    checksum = int.from_bytes(packet[12:16], 'big')  # Checksum (4 bytes)
+    payload = packet[16:] # Payload (decoded as UTF-8)
 
     return ParsedPacket(
         packet_flag=packet_flag,
@@ -153,6 +151,7 @@ def show_help():
 {yellow_text}6. {blue_text}send message (<message>){reset_text} - Send a message {red_text}NOT{reset_text} in fragments to the partner {red_text}(only available when connected).{reset_text}
 {yellow_text}7. {blue_text}send file (<file name>, <length of fragments>){reset_text} - Send a file in fragments to the partner {red_text}(only available when connected).{reset_text}
 {yellow_text}8. {blue_text}send file (<file name>){reset_text} - Send a file {red_text}NOT{reset_text} in fragments to the partner {red_text}(only available when connected).{reset_text}
+{yellow_text}9. {blue_text}change repo (<path>){reset_text} - Change the repository for saving.(Initial path - "saved_messages"){reset_text}
 """)
 
 
@@ -254,20 +253,21 @@ def heartbeat_monitor():
 
 def calculate_crc32(data: bytes) -> int:
     # Initialize CRC and polynomial for 32-bit
-    crc = 0xFFFFFFFF  # Инициализация 32-битного значения CRC
-    polynomial = 0x04C11DB7  # Стандартный полином для CRC32
+    crc = 0xFFFFFFFF  # Initialization of the 32-bit CRC value
+    polynomial = 0x04C11DB7  # Standard polynomial for CRC32
 
     # Process each byte in the data
     for byte in data:
-        crc ^= byte << 24  # XOR с каждым байтом, сдвинутым на 24 бита
+        crc ^= byte << 24  # XOR with each byte, shifted by 24 bits
         for _ in range(8):
-            if crc & 0x80000000:  # Если старший бит (32-й) равен 1
+            if crc & 0x80000000:  # If the most significant bit (32nd) is 1
                 crc = (crc << 1) ^ polynomial
             else:
                 crc <<= 1
-            crc &= 0xFFFFFFFF  # Обеспечение 32-битного значения
+            crc &= 0xFFFFFFFF  # Ensure 32-bit value
 
     return crc
+
 
 def wait_for_ack():
     # Loop until fragments can be sent
@@ -303,7 +303,6 @@ def send_again(total_length, file_name=""):
 
     allReceived = True
     missed_packets = []
-
     canISendFragments = False
 
 def on_successful_ack():
@@ -326,7 +325,6 @@ def set_window_settings(total_length, fragment_length):
     beta = math.ceil(0.125 * math.ceil(total_length / fragment_length))
 
     window_size = min_window_size
-    print(window_size, max_window_size, min_window_size)
 
 def send_file(file_path, fragment_length):
     global packet_ID, state, canISendFragments, allReceived, missed_packets, sent_packets
@@ -357,10 +355,10 @@ def send_file(file_path, fragment_length):
                 sequence_number += 1
                 window_number += 1
 
-                how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
-
-                acknowledgment_number = min(window_size, how_much_left)
-                send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
+                if window_number == 1:
+                    how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
+                    acknowledgment_number = min(window_size, how_much_left)
+                    send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
 
                 print(f"{blue_text}File name:{reset_text} {file_name}, {blue_text}Total length:{reset_text} {total_length}, {blue_text}Number of sent fragments:{reset_text} {sequence_number} {blue_text}Fragment length:{reset_text} {len(data)}, {blue_text}Current size of window: {reset_text}{window_size}, {blue_text}Fragment number in the window: {reset_text}{window_number}")
 
@@ -426,12 +424,10 @@ def send_message(message, fragment_length, flag):
             sequence_number += 1
             window_number += 1
 
-
-            how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
-
-            acknowledgment_number = min(window_size, how_much_left)
-
-            send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
+            if window_number == 1:
+                how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
+                acknowledgment_number = min(window_size, how_much_left)
+                send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
 
             print(f"{blue_text}Total length:{reset_text} {total_length}, {blue_text}Number of sent fragments:{reset_text} {sequence_number} {blue_text}, Fragment length:{reset_text} {len(fragment)}, {blue_text}Current size of window: {reset_text}{window_size}, {blue_text}Fragment number in the window: {reset_text}{window_number}")
 
@@ -480,7 +476,7 @@ def check_fragments(frags_array):
 
 
 def checkIfSomethingIsWrong(packet):
-    global first_fragment_come, start_sending
+    global fragment_come, start_sending
 
     if packet.packet_id + 1 > len(fragments):
         fragments.append(TransferredData("", 0, []))
@@ -490,11 +486,10 @@ def checkIfSomethingIsWrong(packet):
         start_sending = time.time()
 
     if packet.packet_flag == TYPE_MAKE_MONITOR:
-        if None not in fragments[packet.packet_id].arrayOfFragments:
-            fragments[packet.packet_id].arrayOfFragments.extend([None] * packet.acknowledgment_number)
+        fragments[packet.packet_id].arrayOfFragments.extend([None] * packet.acknowledgment_number)
         return
 
-    if packet.packet_flag != TYPE_CHECK:
+    if packet.packet_flag == TYPE_FILENAME or packet.packet_flag == TYPE_MESSAGE or packet.packet_flag == TYPE_FILE:
         calculated_crc = calculate_crc32(packet.payload)
         fragments[packet.packet_id].type = packet.packet_flag
 
@@ -516,18 +511,18 @@ def checkIfSomethingIsWrong(packet):
 
 
 def should_wait_for_fragment():
-    global last_fragment_packet, time_fragment_come, first_fragment_come
+    global last_fragment_packet, time_fragment_come, fragment_come
     while True:
-        if first_fragment_come:
+        if fragment_come:
             current_time = time.time()
             while current_time - time_fragment_come < 1:
-                if not first_fragment_come:
+                if not fragment_come:
                     break
                 current_time = time.time()
-            if first_fragment_come:
+            if fragment_come:
                 packet = ParsedPacket(TYPE_CHECK, last_fragment_packet.packet_id, 0, 0, 0, "0".encode('utf-8'))
                 checkIfSomethingIsWrong(packet)
-                first_fragment_come = False
+                fragment_come = False
 
 
 
@@ -537,20 +532,19 @@ def check_file_exists(file_path):
 
 
 def save_data(packet):
-    global first_fragment_come, end_sending
+    global fragment_come, end_sending, start_sending
 
     total_data[packet.packet_id] += b''.join(frag for frag in fragments[packet.packet_id].arrayOfFragments)
 
     if fragments[packet.packet_id].type == TYPE_FILENAME:
         fragments[packet.packet_id].filename = total_data[packet.packet_id].decode('utf-8')
     if fragments[packet.packet_id].type == TYPE_MESSAGE:
-        print(f"{green_text}The transfer was successful. {blue_text}Duration of the transfer: {reset_text}{end_sending - start_sending}, {blue_text}Total length: {reset_text}{len(total_data[packet.packet_id])}")
         print(f"{blue_text}You got text message:{reset_text}")
         print(f"{total_data[packet.packet_id].decode('utf-8')}")
 
     elif fragments[packet.packet_id].type == TYPE_FILE:
         # Ensure the directory 'saved messages' exists
-        output_directory = "saved_messages"
+        output_directory = save_repository_path
         if not os.path.exists(output_directory):
             os.makedirs(output_directory)
 
@@ -577,7 +571,7 @@ def save_data(packet):
         end_sending = time.time()
 
         print(f"{green_text}The transfer was successful. {blue_text}Duration of the transfer: {reset_text}{end_sending - start_sending}, {blue_text}Total length: {reset_text}{len(total_data[packet.packet_id])}, {blue_text}Path: {reset_text}{filename}")
-
+        start_sending = 0
     # Reset total message and fragments after saving
     total_data[packet.packet_id] = b""
     if fragments[packet.packet_id].type == TYPE_FILENAME:
@@ -586,7 +580,7 @@ def save_data(packet):
 
 # Receives packets and handles the protocol logic for various packet types
 def receive_packet():
-    global heartbeat_received, allReceived, canISendFragments, areYouAFK, last_fragment_packet, time_fragment_come, first_fragment_come, missed_packets
+    global heartbeat_received, allReceived, canISendFragments, areYouAFK, last_fragment_packet, time_fragment_come, fragment_come, missed_packets
 
     while True:
         data, addr = sock.recvfrom(1500)  # Receive packet
@@ -639,20 +633,21 @@ def receive_packet():
         elif packet.packet_flag == TYPE_HEARTBEAT_ACK:
             continue
 
-        if packet.packet_flag == TYPE_FILE or packet.packet_flag == TYPE_MESSAGE or packet.packet_flag == TYPE_FILENAME or packet.packet_flag == TYPE_MAKE_MONITOR:
+        if (packet.packet_flag == TYPE_FILE or packet.packet_flag == TYPE_MESSAGE
+                or packet.packet_flag == TYPE_FILENAME or packet.packet_flag == TYPE_MAKE_MONITOR):
             last_fragment_packet = packet
-            first_fragment_come = True
+            fragment_come = True
             time_fragment_come = time.time()
             checkIfSomethingIsWrong(packet)
             continue
 
         if packet.packet_flag == TYPE_FIN_FRAG:
-            first_fragment_come = False
+            fragment_come = False
             save_data(packet)
 
 
 def handle_commands():
-    global areYouAFK
+    global areYouAFK, save_repository_path
 
     show_help()
 
@@ -715,9 +710,15 @@ def handle_commands():
                 print(f"Your mode is {blue_text}ORDINARY_MODE{reset_text} now.")
             continue
 
+        elif command.startswith("change repo") and state == STATE_CONNECTED:
+            path = command.replace("change repo (", "").replace(")", "")
+            print (f"The save repository has been updated to '{path}'")
+            save_repository_path = path
+            continue
         else:
             print(f"{red_text}Invalid command or inappropriate state.{reset_text} Type {blue_text}'help'{reset_text} for the list of available commands.")
             continue
+
 
         areYouAFK = 0
 
@@ -726,10 +727,10 @@ def add_task_to_queue(task, *args):
     message_queue.put((task, args))
 
 
-def process_message_queue():
+def process_task_queue():
     while True:
         if not message_queue.empty():
-            if state == STATE_CONNECTED:  # Sending messages only in the CONNECTED state
+            if state == STATE_CONNECTED:
                 task, args = message_queue.get()
                 task(*args)
 
@@ -753,7 +754,7 @@ heartbeat_thread.daemon = True
 heartbeat_thread.start()
 
 # Thread for processing message queue
-message_thread = threading.Thread(target=process_message_queue, args=())
+message_thread = threading.Thread(target=process_task_queue, args=())
 message_thread.daemon = True
 message_thread.start()
 
