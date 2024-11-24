@@ -19,7 +19,7 @@ class ParsedPacket:
     packet_flag: int = 0  # Packet type
     packet_id: int = 0  # Unique packet identifier
     sequence_number: int = 0  # Current fragment number
-    acknowledgment_number: int = 0 # Window size
+    window_size: int = 0 # Window size
     checksum: int = 0  # Checksum for error detection
     payload: bytes = field(default_factory=lambda: bytes())  # Payload (message or data)
 
@@ -82,7 +82,7 @@ fragments = []
 total_data = []
 max_value_of_fragment = 1450
 
-window_size = 0
+global_window_size = 0
 max_window_size = 0
 min_window_size = 6
 alpha = 0
@@ -104,19 +104,19 @@ def change_mode(new_mode):
     mode = new_mode
 
 # Creates the packet with specified parameters and encodes it to bytes
-def create_packet(packet_flag, packet_id, sequence_number, acknowledgment_number, checksum, payload):
+def create_packet(packet_flag, packet_id, sequence_number, window_size, checksum, payload):
     packet = packet_flag.to_bytes(1, 'big')  # Packet type (1 byte)
     packet += packet_id.to_bytes(3, 'big')  # Packet ID (3 bytes)
     packet += sequence_number.to_bytes(4, 'big')  # Sequence number (4 byte)
-    packet += acknowledgment_number.to_bytes(4, 'big')  # Acknowledgment number (4 bytes)
+    packet += window_size.to_bytes(4, 'big')  # Acknowledgment number (4 bytes)
     packet += checksum.to_bytes(4, 'big')  # Checksum (3 bytes)
     packet += payload
     return packet
 
 
 # Sends the packet to the remote node
-def send_packet(packet_flag, packet_id=0, sequence_number=0, acknowledgment_number=0, checksum=0, payload='0'.encode('utf-8')):
-    packet = create_packet(packet_flag, packet_id, sequence_number, acknowledgment_number, checksum, payload)
+def send_packet(packet_flag, packet_id=0, sequence_number=0, window_size=0, checksum=0, payload='0'.encode('utf-8')):
+    packet = create_packet(packet_flag, packet_id, sequence_number, window_size, checksum, payload)
     sock.sendto(packet, (remote_ip, remote_port))
 
 
@@ -125,7 +125,7 @@ def parse_packet(packet):
     packet_flag = int.from_bytes(packet[0:1], 'big')  # Packet type (1 byte)
     packet_id = int.from_bytes(packet[1:4], 'big')  # Packet ID (3 bytes)
     sequence_number = int.from_bytes(packet[4:8], 'big')  # Sequence number (4 byte)
-    acknowledgment_number = int.from_bytes(packet[8:12], 'big') # Acknowledgment number (4 bytes)
+    window_size = int.from_bytes(packet[8:12], 'big') # Window size (4 bytes)
     checksum = int.from_bytes(packet[12:16], 'big')  # Checksum (4 bytes)
     payload = packet[16:] # Payload (decoded as UTF-8)
 
@@ -133,7 +133,7 @@ def parse_packet(packet):
         packet_flag=packet_flag,
         packet_id=packet_id,
         sequence_number=sequence_number,
-        acknowledgment_number=acknowledgment_number,
+        window_size=window_size,
         checksum=checksum,
         payload=payload
     )
@@ -306,16 +306,16 @@ def send_again(total_length, file_name=""):
     canISendFragments = False
 
 def on_successful_ack():
-    global window_size
-    if window_size <= max_window_size:
-        window_size = min(int(window_size + alpha), max_window_size)
+    global global_window_size
+    if global_window_size <= max_window_size:
+        global_window_size = min(int(global_window_size + alpha), max_window_size)
 
 def on_packet_loss():
-    global window_size
-    window_size = max(int(window_size - beta), min_window_size)
+    global global_window_size
+    global_window_size = max(int(global_window_size - beta), min_window_size)
 
 def set_window_settings(total_length, fragment_length):
-    global max_window_size, min_window_size, window_size, alpha, beta
+    global max_window_size, min_window_size, global_window_size, alpha, beta
 
     min_window_size = max(math.ceil(0.1 * math.ceil(total_length / fragment_length)), 6)
 
@@ -324,7 +324,7 @@ def set_window_settings(total_length, fragment_length):
     alpha = math.ceil(0.125 * math.ceil(total_length / fragment_length))
     beta = math.ceil(0.125 * math.ceil(total_length / fragment_length))
 
-    window_size = min_window_size
+    global_window_size = min_window_size
 
 def send_file(file_path, fragment_length):
     global packet_ID, state, canISendFragments, allReceived, missed_packets, sent_packets
@@ -344,6 +344,8 @@ def send_file(file_path, fragment_length):
 
     set_window_settings(total_length, fragment_length)
 
+    window_size = 0
+
     with open(file_path, "rb") as file:
         data = file.read(fragment_length)
         while True:
@@ -357,8 +359,8 @@ def send_file(file_path, fragment_length):
 
                 if window_number == 1:
                     how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
-                    acknowledgment_number = min(window_size, how_much_left)
-                    send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
+                    window_size = min(global_window_size, how_much_left)
+                    send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, window_size)
 
                 print(f"{blue_text}File name:{reset_text} {file_name}, {blue_text}Total length:{reset_text} {total_length}, {blue_text}Number of sent fragments:{reset_text} {sequence_number} {blue_text}Fragment length:{reset_text} {len(data)}, {blue_text}Current size of window: {reset_text}{window_size}, {blue_text}Fragment number in the window: {reset_text}{window_number}")
 
@@ -413,6 +415,8 @@ def send_message(message, fragment_length, flag):
 
     set_window_settings(total_length, fragment_length)
 
+    window_size = 0
+
     while position < total_length:
         if allReceived:
             if position + fragment_length >= total_length:
@@ -426,8 +430,8 @@ def send_message(message, fragment_length, flag):
 
             if window_number == 1:
                 how_much_left = max(math.ceil((total_length - sequence_number * fragment_length) / fragment_length), 1)
-                acknowledgment_number = min(window_size, how_much_left)
-                send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, acknowledgment_number)
+                window_size = min(global_window_size, how_much_left)
+                send_packet(TYPE_MAKE_MONITOR, packet_ID, 0, window_size)
 
             print(f"{blue_text}Total length:{reset_text} {total_length}, {blue_text}Number of sent fragments:{reset_text} {sequence_number} {blue_text}, Fragment length:{reset_text} {len(fragment)}, {blue_text}Current size of window: {reset_text}{window_size}, {blue_text}Fragment number in the window: {reset_text}{window_number}")
 
@@ -486,7 +490,7 @@ def checkIfSomethingIsWrong(packet):
         start_sending = time.time()
 
     if packet.packet_flag == TYPE_MAKE_MONITOR:
-        fragments[packet.packet_id].arrayOfFragments.extend([None] * packet.acknowledgment_number)
+        fragments[packet.packet_id].arrayOfFragments.extend([None] * packet.window_size)
         return
 
     if packet.packet_flag == TYPE_FILENAME or packet.packet_flag == TYPE_MESSAGE or packet.packet_flag == TYPE_FILE:
@@ -623,6 +627,8 @@ def receive_packet():
         # Handle heartbeat packets to maintain connection health
         if packet.packet_flag == TYPE_HEARTBEAT and state == STATE_CONNECTED:
             send_packet(TYPE_HEARTBEAT_ACK)  # Send HEARTBEAT-ACK
+            packet = ParsedPacket(TYPE_CHECK, last_fragment_packet.packet_id, 0, 0, 0, "0".encode('utf-8'))
+            checkIfSomethingIsWrong(packet)
             continue
         elif packet.packet_flag == TYPE_HEARTBEAT:
             continue
@@ -738,7 +744,7 @@ def process_task_queue():
 # Network settings
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 local_port = int(input("Enter the port to listen on: "))
-remote_ip = "127.0.0.1"
+remote_ip = input("Enter the IP address of the remote server: ")
 remote_port = int(input("Enter the target node's port: "))
 print(f"Sending messages to {remote_ip}:{remote_port}")
 sock.bind(("", local_port))
