@@ -68,11 +68,9 @@ areYouAFK = 1
 
 start_sending = 0
 end_sending = 0
+
 sent_packets = []
 missed_packets = []
-fragment_come = False
-time_fragment_come = time.time()
-dont_should_wait = True
 
 packet_ID = -1
 last_fragment_packet = ParsedPacket()
@@ -84,7 +82,7 @@ max_value_of_fragment = 1450
 
 global_window_size = 0
 max_window_size = 0
-min_window_size = 6
+min_window_size = 0
 alpha = 0
 beta = 0
 
@@ -252,7 +250,6 @@ def heartbeat_monitor():
 
 
 def calculate_crc32(data: bytes) -> int:
-    # Initialize CRC and polynomial for 32-bit
     crc = 0xFFFFFFFF  # Initialization of the 32-bit CRC value
     polynomial = 0x04C11DB7  # Standard polynomial for CRC32
 
@@ -285,7 +282,6 @@ def damage_packet(crc):
 
 def send_again(total_length, file_name=""):
     global allReceived, missed_packets, canISendFragments
-    time.sleep(0.5)
     for sequence_number_of_missed_packet in missed_packets:
         for sent_packet in sent_packets:
             parsed_sent_packet = parse_packet(sent_packet)
@@ -317,9 +313,11 @@ def on_packet_loss():
 def set_window_settings(total_length, fragment_length):
     global max_window_size, min_window_size, global_window_size, alpha, beta
 
-    min_window_size = max(math.ceil(0.1 * math.ceil(total_length / fragment_length)), 6)
+    min_window_size = min(max(math.ceil(0.1 * math.ceil(total_length / fragment_length)), 3), 150)
 
-    max_window_size = max(math.ceil(0.5 * math.ceil(total_length / fragment_length)), min_window_size)
+    max_window_size = min(max(math.ceil(0.5 * math.ceil(total_length / fragment_length)), min_window_size),150)
+
+    max_window_size = max(max_window_size, min_window_size)
 
     alpha = math.ceil(0.125 * math.ceil(total_length / fragment_length))
     beta = math.ceil(0.125 * math.ceil(total_length / fragment_length))
@@ -340,7 +338,7 @@ def send_file(file_path, fragment_length):
 
     file_name = os.path.basename(file_path)
 
-    send_message(file_name, len(file_name) if total_length == fragment_length else fragment_length, 'n')
+    send_message(file_name, fragment_length, 'n')
 
     set_window_settings(total_length, fragment_length)
 
@@ -371,14 +369,15 @@ def send_file(file_path, fragment_length):
 
                 packet = create_packet(TYPE_FILE, packet_ID, sequence_number, 0, crc, data)
                 sent_packets.append(packet)
-
                 data = file.read(fragment_length)
 
                 if window_number == window_size or (not data and window_number != 0):
                     canISendFragments = False
                     print(f"{red_text}Wait for ack{reset_text}")
+                    send_packet(TYPE_CHECK, packet_ID)
                     wait_for_ack()
                     if state == STATE_DISCONNECTED:
+                        print(f"{red_text}The transfer was unsuccessful.{reset_text}")
                         return
                     window_number = 0
                     if allReceived:
@@ -388,6 +387,7 @@ def send_file(file_path, fragment_length):
             else:
                 send_again(total_length, file_name)
                 print(f"{red_text}Wait for ack{reset_text}")
+                send_packet(TYPE_CHECK, packet_ID)
                 wait_for_ack()
                 if state == STATE_DISCONNECTED:
                     print(f"{red_text}The transfer was unsuccessful.{reset_text}")
@@ -445,8 +445,10 @@ def send_message(message, fragment_length, flag):
             if window_number == window_size or (position + fragment_length >= total_length and window_number != 0):
                 canISendFragments = False
                 print(f"{red_text}Wait for ack{reset_text}")
+                send_packet(TYPE_CHECK, packet_ID)
                 wait_for_ack()
                 if state == STATE_DISCONNECTED:
+                    print(f"{red_text}The transfer was unsuccessful.{reset_text}")
                     return
                 window_number = 0
                 if allReceived:
@@ -457,6 +459,7 @@ def send_message(message, fragment_length, flag):
 
             send_again(total_length)
             print(f"{red_text}Wait for ack{reset_text}")
+            send_packet(TYPE_CHECK, packet_ID)
             wait_for_ack()
             if state == STATE_DISCONNECTED:
                 print(f"{red_text}The transfer was unsuccessful.{reset_text}")
@@ -480,7 +483,7 @@ def check_fragments(frags_array):
 
 
 def checkIfSomethingIsWrong(packet):
-    global fragment_come, start_sending
+    global start_sending
 
     if packet.packet_id + 1 > len(fragments):
         fragments.append(TransferredData("", 0, []))
@@ -514,21 +517,6 @@ def checkIfSomethingIsWrong(packet):
             send_packet(TYPE_NACK, packet.packet_id, 0, 0, packet.checksum, missed.encode('utf-8'))
 
 
-def should_wait_for_fragment():
-    global last_fragment_packet, time_fragment_come, fragment_come
-    while True:
-        if fragment_come:
-            current_time = time.time()
-            while current_time - time_fragment_come < 1:
-                if not fragment_come:
-                    break
-                current_time = time.time()
-            if fragment_come:
-                packet = ParsedPacket(TYPE_CHECK, last_fragment_packet.packet_id, 0, 0, 0, "0".encode('utf-8'))
-                checkIfSomethingIsWrong(packet)
-                fragment_come = False
-
-
 
 def check_file_exists(file_path):
     # Check if file exists at the given path
@@ -536,7 +524,7 @@ def check_file_exists(file_path):
 
 
 def save_data(packet):
-    global fragment_come, end_sending, start_sending
+    global end_sending, start_sending
 
     total_data[packet.packet_id] += b''.join(frag for frag in fragments[packet.packet_id].arrayOfFragments)
 
@@ -575,8 +563,8 @@ def save_data(packet):
         end_sending = time.time()
 
         print(f"{green_text}The transfer was successful. {blue_text}Duration of the transfer: {reset_text}{end_sending - start_sending}, {blue_text}Total length: {reset_text}{len(total_data[packet.packet_id])}, {blue_text}Path: {reset_text}{filename}")
-        start_sending = 0
     # Reset total message and fragments after saving
+    start_sending = 0
     total_data[packet.packet_id] = b""
     if fragments[packet.packet_id].type == TYPE_FILENAME:
         fragments[packet.packet_id] = TransferredData(fragments[packet.packet_id].filename, TYPE_FILE, [])
@@ -584,7 +572,7 @@ def save_data(packet):
 
 # Receives packets and handles the protocol logic for various packet types
 def receive_packet():
-    global heartbeat_received, allReceived, canISendFragments, areYouAFK, last_fragment_packet, time_fragment_come, fragment_come, missed_packets
+    global heartbeat_received, allReceived, canISendFragments, areYouAFK, last_fragment_packet, missed_packets
 
     while True:
         data, addr = sock.recvfrom(1500)  # Receive packet
@@ -640,15 +628,12 @@ def receive_packet():
             continue
 
         if (packet.packet_flag == TYPE_FILE or packet.packet_flag == TYPE_MESSAGE
-                or packet.packet_flag == TYPE_FILENAME or packet.packet_flag == TYPE_MAKE_MONITOR):
+                or packet.packet_flag == TYPE_FILENAME or packet.packet_flag == TYPE_MAKE_MONITOR or packet.packet_flag == TYPE_CHECK):
             last_fragment_packet = packet
-            fragment_come = True
-            time_fragment_come = time.time()
             checkIfSomethingIsWrong(packet)
             continue
 
         if packet.packet_flag == TYPE_FIN_FRAG:
-            fragment_come = False
             save_data(packet)
 
 
@@ -743,8 +728,10 @@ def process_task_queue():
 
 # Network settings
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)
+
 local_port = int(input("Enter the port to listen on: "))
-remote_ip = input("Enter the IP address of the remote server: ")
+remote_ip = input("Enter the IP address: ")
 remote_port = int(input("Enter the target node's port: "))
 print(f"Sending messages to {remote_ip}:{remote_port}")
 sock.bind(("", local_port))
@@ -764,9 +751,6 @@ message_thread = threading.Thread(target=process_task_queue, args=())
 message_thread.daemon = True
 message_thread.start()
 
-message_thread = threading.Thread(target=should_wait_for_fragment, args=())
-message_thread.daemon = True
-message_thread.start()
 
 # Command handler
 handle_commands()
