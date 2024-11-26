@@ -34,33 +34,31 @@ STATE_DISCONNECTED = "DISCONNECTED"  # State: disconnected
 STATE_WAIT_SYN_ACK = "WAIT_SYN_ACK"  # State: waiting for SYN-ACK
 STATE_CONNECTED = "CONNECTED"  # State: connected
 STATE_WAIT_FIN_ACK = "WAIT_FIN_ACK"  # State: waiting for FIN-ACK
-STATE_WAIT_ACK = "WAIT_ACK"
 
 ORDINARY_MODE = "ORDINARY"
 LOSS_MODE = "LOSS"
 
 # Packet's types
-TYPE_MESSAGE = 0x01  # Packet type: message
-TYPE_FILE = 0x02  # Packet type: DATA (file or data transmission)
-TYPE_FILENAME = 0x03
-TYPE_MAKE_MONITOR = 0x04
-TYPE_FIN_FRAG = 0x05
-TYPE_CHECK = 0x06
-TYPE_ACK = 0x07  # Packet type: ACK (acknowledgment)
-TYPE_NACK = 0x08  # Packet type: NACK (negative acknowledgment)
-TYPE_SYN = 0x09  # Packet type: SYN (connection request)
-TYPE_SYN_ACK = 0x0A  # Packet type: SYN-ACK (response to SYN)
+TYPE_MESSAGE = 0x01  # Packet type: message (used for sending plain text messages)
+TYPE_FILE = 0x02  # Packet type: DATA (used for sending file fragments or general data transmission)
+TYPE_FILENAME = 0x03  # Packet type: Filename (used for sending the name of the file being transmitted)
+TYPE_MAKE_MONITOR = 0x04  # Packet type: Monitor setup (used for setting up monitoring parameters)
+TYPE_FIN_FRAG = 0x05  # Packet type: End of Fragments (indicates the end of file/data fragments)
+TYPE_CHECK = 0x06  # Packet type: Check (used to check the status of received fragments)
+TYPE_ACK = 0x07  # Packet type: ACK (acknowledgment for successfully received data)
+TYPE_NACK = 0x08  # Packet type: NACK (negative acknowledgment for missing or corrupted data)
+TYPE_SYN = 0x09  # Packet type: SYN (connection request to initiate a session)
+TYPE_SYN_ACK = 0x0A  # Packet type: SYN-ACK (response to SYN, confirming connection request)
 TYPE_FIN = 0x0B  # Packet type: FIN (connection termination request)
-TYPE_FIN_ACK = 0x0C  # Packet type: FIN-ACK (final acknowledgment for FIN)
-TYPE_HEARTBEAT = 0x0D  # Packet type: HEARTBEAT (keep-alive signal)
-TYPE_HEARTBEAT_ACK = 0x0E  # Packet type: HEARTBEAT-ACK (acknowledgment for HEARTBEAT)
+TYPE_FIN_ACK = 0x0C  # Packet type: FIN-ACK (acknowledgment for FIN, finalizing termination)
+TYPE_HEARTBEAT = 0x0D  # Packet type: HEARTBEAT (keep-alive signal sent periodically to ensure connection stability)
+TYPE_HEARTBEAT_ACK = 0x0E  # Packet type: HEARTBEAT-ACK (acknowledgment for HEARTBEAT to confirm connection is active)
 
 state = STATE_DISCONNECTED  # Initial state
 mode = ORDINARY_MODE # Initial mode
 save_repository_path = "saved_messages"
 
-heartbeat_interval = 5
-heartbeat_interval_to_ans = 2
+heartbeat_interval = 4
 max_missed_heartbeats = 3
 heartbeat_missed = 0
 heartbeat_received = False
@@ -114,9 +112,12 @@ def create_packet(packet_flag, packet_id, sequence_number, window_size, checksum
 
 # Sends the packet to the remote node
 def send_packet(packet_flag, packet_id=0, sequence_number=0, window_size=0, checksum=0, payload='0'.encode('utf-8')):
+    global areYouAFK
     packet = create_packet(packet_flag, packet_id, sequence_number, window_size, checksum, payload)
     sock.sendto(packet, (remote_ip, remote_port))
-
+    if (packet_flag == TYPE_FILE or packet_flag == TYPE_MESSAGE
+            or packet_flag == TYPE_FILENAME or packet_flag == TYPE_MAKE_MONITOR or packet_flag == TYPE_CHECK):
+                areYouAFK = 0
 
 # Parses the received packet and extracts the header and payload information
 def parse_packet(packet):
@@ -233,7 +234,7 @@ def heartbeat_monitor():
 
         send_packet(TYPE_HEARTBEAT)  # Send HEARTBEAT
 
-        time.sleep(heartbeat_interval_to_ans)
+        time.sleep(1)
 
         if heartbeat_received:
             heartbeat_missed = 0  # Reset missed heartbeats
@@ -577,8 +578,6 @@ def receive_packet():
     while True:
         data, addr = sock.recvfrom(1500)  # Receive packet
 
-        areYouAFK = 0
-
         packet = parse_packet(data)
 
         if packet.packet_flag == TYPE_ACK:
@@ -615,8 +614,9 @@ def receive_packet():
         # Handle heartbeat packets to maintain connection health
         if packet.packet_flag == TYPE_HEARTBEAT and state == STATE_CONNECTED:
             send_packet(TYPE_HEARTBEAT_ACK)  # Send HEARTBEAT-ACK
-            packet = ParsedPacket(TYPE_CHECK, last_fragment_packet.packet_id, 0, 0, 0, "0".encode('utf-8'))
-            checkIfSomethingIsWrong(packet)
+            if last_fragment_packet.packet_flag != 0:
+                packet = ParsedPacket(TYPE_CHECK, last_fragment_packet.packet_id, 0, 0, 0, "0".encode('utf-8'))
+                checkIfSomethingIsWrong(packet)
             continue
         elif packet.packet_flag == TYPE_HEARTBEAT:
             continue
@@ -631,9 +631,11 @@ def receive_packet():
                 or packet.packet_flag == TYPE_FILENAME or packet.packet_flag == TYPE_MAKE_MONITOR or packet.packet_flag == TYPE_CHECK):
             last_fragment_packet = packet
             checkIfSomethingIsWrong(packet)
+            areYouAFK = 0
             continue
 
         if packet.packet_flag == TYPE_FIN_FRAG:
+            last_fragment_packet = ParsedPacket()
             save_data(packet)
 
 
@@ -711,9 +713,6 @@ def handle_commands():
             continue
 
 
-        areYouAFK = 0
-
-
 def add_task_to_queue(task, *args):
     message_queue.put((task, args))
 
@@ -731,7 +730,7 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)
 
 local_port = int(input("Enter the port to listen on: "))
-remote_ip = input("Enter the IP address: ")
+remote_ip = input("Enter the IP address of the target node: ")
 remote_port = int(input("Enter the target node's port: "))
 print(f"Sending messages to {remote_ip}:{remote_port}")
 sock.bind(("", local_port))
