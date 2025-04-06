@@ -7,6 +7,7 @@ import os
 import random
 from typing import List
 import math
+import hashlib
 
 @dataclass
 class TransferredData:
@@ -280,6 +281,9 @@ def should_drop_or_damage_packet(probability):
 def damage_packet(crc):
     return crc ^ 0x1
 
+def calculate_hash(data):
+    return hashlib.sha256(data).hexdigest()
+
 
 def send_again(total_length, file_name=""):
     global allReceived, missed_packets, canISendFragments
@@ -345,6 +349,8 @@ def send_file(file_path, fragment_length):
 
     window_size = 0
 
+    hashed_output = calculate_hash(content)
+
     with open(file_path, "rb") as file:
         data = file.read(fragment_length)
         while True:
@@ -395,7 +401,7 @@ def send_file(file_path, fragment_length):
                     return
 
 
-    send_packet(TYPE_FIN_FRAG, packet_ID, 0, window_number)
+    send_packet(TYPE_FIN_FRAG, packet_ID, 0, window_number, 0, hashed_output.encode('utf-8'))
 
     sent_packets = []
 
@@ -412,11 +418,15 @@ def send_message(message, fragment_length, flag):
     window_number = 0
     position = -fragment_length
 
+    message = message.encode('utf-8')
+
     total_length = len(message)
 
     set_window_settings(total_length, fragment_length)
 
     window_size = 0
+
+    hashed_output = calculate_hash(message)
 
     while position < total_length:
         if allReceived:
@@ -424,7 +434,7 @@ def send_message(message, fragment_length, flag):
                 break
 
             position += fragment_length
-            fragment = message[position:min(position + fragment_length, total_length)].encode('utf-8')
+            fragment = message[position:min(position + fragment_length, total_length)]
             crc = calculate_crc32(fragment)
             sequence_number += 1
             window_number += 1
@@ -466,7 +476,7 @@ def send_message(message, fragment_length, flag):
                 print(f"{red_text}The transfer was unsuccessful.{reset_text}")
                 return
 
-    send_packet(TYPE_FIN_FRAG, packet_ID, 0, window_number)
+    send_packet(TYPE_FIN_FRAG, packet_ID, 0, window_number, 0, hashed_output.encode('utf-8'))
 
     sent_packets = []
 
@@ -528,6 +538,13 @@ def save_data(packet):
     global end_sending, start_sending
 
     total_data[packet.packet_id] += b''.join(frag for frag in fragments[packet.packet_id].arrayOfFragments)
+
+    if calculate_hash(total_data[packet.packet_id]) == packet.payload.decode('utf-8'):
+        print(f"{green_text}Hash is OK{reset_text}")
+        print(f"{blue_text}Calculated hash:{reset_text} {calculate_hash(total_data[packet.packet_id])}, {blue_text}sent hash:{reset_text} {packet.payload.decode('utf-8')} ")
+    else:
+        print(f"{green_text}Hash is not OK{reset_text}")
+        print(f"{blue_text}Calculated hash:{reset_text} {calculate_hash(total_data[packet.packet_id])}, {blue_text}sent hash:{reset_text} {packet.payload.decode('utf-8')} ")
 
     if fragments[packet.packet_id].type == TYPE_FILENAME:
         fragments[packet.packet_id].filename = total_data[packet.packet_id].decode('utf-8')
